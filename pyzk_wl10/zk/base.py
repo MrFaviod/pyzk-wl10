@@ -79,6 +79,14 @@ class ZK_helper(object):
 
 
 class ZK(object):
+    """Main ZK device client.
+
+    Supports both the standard pyzk protocol (ZEM500/ZEM600/iClock/...)
+    and the WL10/AK3750 family. The latter is opt-in via
+    ``wl10=True``; see the README and the :class:`_wl10_*` methods
+    below for the protocol details.
+    """
+
     def __init__(self, ip, port=4370, timeout=60, password=0, force_udp=False, ommit_ping=False, verbose=False, encoding='UTF-8', wl10=False):
         User.encoding = encoding
         self.__address = (ip, port)
@@ -247,6 +255,32 @@ class ZK(object):
         d = datetime(year, month, day, hour, minute, second)
         return d
 
+    @staticmethod
+    def _decode_zk_time(value):
+        """Decode a ZK 4-byte timestamp (uint32) to a :class:`datetime`.
+
+        Returns ``None`` for value 0 or for out-of-range dates.
+        Public alias of the private ``__decode_time`` so the WL10
+        parser can use it without name-mangling.
+        """
+        if not value:
+            return None
+        second = value % 60
+        value //= 60
+        minute = value % 60
+        value //= 60
+        hour = value % 24
+        value //= 24
+        day = value % 31 + 1
+        value //= 31
+        month = value % 12 + 1
+        value //= 12
+        year = value + 2000
+        try:
+            return datetime(year, month, day, hour, minute, second)
+        except (ValueError, OverflowError):
+            return None
+
     def __decode_timehex(self, timehex):
         year, month, day, hour, minute, second = unpack("6B", timehex)
         year += 2000
@@ -278,8 +312,15 @@ class ZK(object):
             cmd_response = self.__send_command(const.CMD_AUTH, command_string)
         if cmd_response.get('status'):
             self.is_connect = True
-            self.platform = self.get_platform()
-            if 'WL10' in self.get_device_name() or 'AK3750' in self.platform or self.wl10:
+            try:
+                self.platform = self.get_platform()
+            except Exception:
+                self.platform = ''
+            try:
+                device_name = self.get_device_name()
+            except Exception:
+                device_name = ''
+            if 'WL10' in device_name or 'AK3750' in self.platform or self.wl10:
                 self.wl10 = True
                 if self.verbose:
                     print("Detected WL10/AK3750 platform - using WL10 mode")
@@ -484,8 +525,9 @@ class ZK(object):
 
     def read_sizes(self):
         if self.wl10:
-            self._wl10_read_sizes()
-            return
+            if self._wl10_read_sizes():
+                return
+            # Fall through to standard method if WL10 mode failed
         command = const.CMD_GET_FREE_SIZES
         response_size = 1024
         cmd_response = self.__send_command(command, b'', response_size)
@@ -516,7 +558,29 @@ class ZK(object):
             raise ZKErrorResponse("can't read sizes")
 
     def _wl10_read_sizes(self):
-        pass
+        """Try to read device sizes in WL10 mode.
+        Uses direct CMD_GET_FREE_SIZES (50) command."""
+        try:
+            command = const.CMD_GET_FREE_SIZES
+            response_size = 1024
+            cmd_response = self.__send_command(command, b'', response_size)
+            if cmd_response.get('status') and len(self.__data) >= 80:
+                fields = unpack('20i', self.__data[:80])
+                self.users = fields[4]
+                self.fingers = fields[6]
+                self.records = fields[8]
+                self.dummy = fields[10]
+                self.cards = fields[12]
+                self.fingers_cap = fields[14]
+                self.users_cap = fields[15]
+                self.rec_cap = fields[16]
+                self.fingers_av = fields[17]
+                self.users_av = fields[18]
+                self.rec_av = fields[19]
+                return True
+        except Exception:
+            pass
+        return False
 
     def unlock(self, time=3):
         command = const.CMD_UNLOCK
@@ -593,174 +657,425 @@ class ZK(object):
         else:
             return False
 
-    # ================== WL10 Specific Methods ==================
-    def _wl10_read_bulk_data(self, command_code, function_code=0):
-        if not self.wl10:
-            raise ZKErrorResponse("Not in WL10 mode")
-        cmd_response = self.__send_command(command_code, b'', 4096)
-        if cmd_response.get('status') and cmd_response['code'] == const.CMD_PREPARE_DATA:
-            all_data = self.__data
-            while True:
-                try:
-                    chunk = self.__recieve_chunk()
-                    if chunk:
-                        all_data += chunk
-                    else:
-                        break
-                except Exception:
-                    break
-            return all_data
-        elif cmd_response.get('status') and cmd_response['code'] == const.CMD_DATA:
-            all_data = self.__data
-            while True:
-                try:
-                    chunk = self.__recieve_chunk()
-                    if chunk:
-                        all_data += chunk
-                    else:
-                        break
-                except Exception:
-                    break
-            return all_data
-        return b''
-
-    def _wl10_read_attlog_buffered(self):
-        """Read attendance log using CMD_DATA_WRRQ (buffered protocol)."""
-        if not self.wl10:
-            raise ZKErrorResponse("Not in WL10 mode")
-        # CMD_DATA_WRRQ with table=FCT_ATTLOG (1), parameter=0
-        cmd_data = pack('II', const.FCT_ATTLOG, 0)
-        cmd_response = self.__send_command(const.CMD_DATA_WRRQ, cmd_data, 4096)
-        if not cmd_response.get('status'):
-            return b''
-        all_data = b''
-        # First chunk is in cmd_response
-        if cmd_response['code'] == const.CMD_PREPARE_DATA:
-            all_data = self.__data
-        elif cmd_response['code'] == const.CMD_DATA:
-            all_data = self.__data
-        # Receive remaining chunks
-        while True:
-            try:
-                chunk = self.__recieve_chunk()
-                if chunk:
-                    all_data += chunk
-                else:
-                    break
-            except Exception:
-                break
-        # Free data buffer
-        self.__send_command(const.CMD_FREE_DATA, b'')
-        return all_data
-
-    def _wl10_parse_users(self, raw_data):
-        if len(raw_data) < 4:
-            return []
-        total = unpack('I', raw_data[:4])[0]
-        user_data = raw_data[4:]
-        users = []
-        while len(user_data) >= 72:
-            rec = user_data[:72]
-            uid = unpack('<I', rec[0:4])[0]
-            privilege = unpack('<I', rec[8:12])[0] & 0xFF
-            name_bytes = rec[19:43]
-            name = name_bytes.split(b'\x00')[0].decode('utf-8', errors='ignore').strip()
-            user_id_bytes = rec[56:64]
-            user_id = user_id_bytes.split(b'\x00')[0].decode('utf-8', errors='ignore')
-            card_bytes = rec[64:72]
-            card = unpack('<Q', card_bytes)[0] if len(card_bytes) >= 8 else 0
-            if not name:
-                name = "NN-%s" % user_id
-            if not user_id:
-                user_id = str(uid) if uid else str(privilege)
-            user = User(uid, name, privilege, '', '', user_id, card)
-            users.append(user)
-            user_data = user_data[72:]
-        return users
-
-    def _wl10_get_users(self):
-        raw_data = self._wl10_read_bulk_data(const.CMD_USERTEMP_RRQ)
-        return self._wl10_parse_users(raw_data)
+    # ================== WL10 / AK3750 Specific Methods ==================
+    #
+    # The WL10 (and its sibling AK3750) platform differs from the
+    # standard pyzk protocol in two ways, observed by reverse
+    # engineering against AK3750WIFI_TFT firmware "Ver 6.60 May 19 2023":
+    #
+    # * Bulk responses are framed with a 4-byte section header at the
+    #   start (the 4-byte outer header is already stripped by the TCP
+    #   layer). The section header holds the byte size of the records
+    #   section that follows; for N records of M bytes it equals N * M.
+    #
+    # * User records use the standard 72-byte pyzk layout (NOT a custom
+    #   one as the previous fork claimed):
+    #     0-1   uid (uint16 LE)
+    #     2     privilege (uint8)        -- 0=user, 14=admin
+    #     3-10  password (8 bytes)
+    #     11-34 name (24 bytes, ASCII, null-terminated)
+    #     35-38 card (uint32 LE)
+    #     39    padding
+    #     40-46 group_id (7 bytes)
+    #     47    padding
+    #     48-71 user_id / badge (24 bytes, ASCII, null-terminated)
+    #
+    # * Attendance records are 22 bytes long, NOT 8/16/28/40:
+    #     0-1   uid (uint16 LE)
+    #     2-7   user_id (6 bytes, ASCII, null-terminated)
+    #     8-11  reserved (zeros)
+    #     12    flag (always 0x01 on the observed firmwares)
+    #     13-16 timestamp (uint32 LE, ZK format)
+    #     17    status (0=Check-In, 1=Check-Out, 2..5=other states)
+    #     18-21 reserved (zeros)
+    #
+    # The previous implementation guessed record layouts from a small
+    # set of candidates and picked whichever produced the most records,
+    # which produced the wrong totals (1028 records instead of 543, and
+    # 1001 instead of 1058). The implementation below uses the actual
+    # documented layout.
 
     @staticmethod
-    def _decode_zk_time(val):
-        second = val % 60
-        t = val // 60
-        minute = t % 60
-        t //= 60
-        hour = t % 24
-        t //= 24
-        day = t % 31 + 1
-        t //= 31
-        month = t % 12 + 1
-        t //= 12
-        year = t + 2000
-        try:
-            return datetime(year, month, day, hour, minute, second)
-        except (ValueError, OverflowError):
-            return None
+    def _wl10_extract_tcp_payloads(raw_data):
+        """Concatenate the ZK payloads carried in a stream of TCP packets.
 
-    def _wl10_parse_attendance(self, raw_data, users_map=None):
-        if len(raw_data) < 4:
-            return []
-        total = unpack('I', raw_data[:4])[0]
-        att_data = raw_data[4:]
-        attendances = []
-        current_user_id = ''
-        rec_size = const.WL10_ATT_RECORD_SIZE
-        while len(att_data) >= rec_size:
-            rec = att_data[:rec_size]
-            uid = unpack('<I', rec[0:4])[0]
-            ts_val = unpack('<I', rec[4:8])[0]
-            status = rec[8]
-            punch = rec[9]
-            user_id_raw = rec[10:16]
-            user_id_att = user_id_raw.split(b'\x00')[0].decode('utf-8', errors='ignore')
-            if user_id_att and user_id_att.isdigit() and len(user_id_att) >= 2:
-                current_user_id = user_id_att
-            ts = self._decode_zk_time(ts_val) if ts_val else None
-            if ts is None:
-                att_data = att_data[rec_size:]
-                continue
-            if ts.year < 2020 or ts.year >= 2030:
-                att_data = att_data[rec_size:]
-                continue
-            badge = str(uid) if uid else ''
-            name = ''
-            if current_user_id and users_map and current_user_id in users_map:
-                name = users_map[current_user_id].get('name', '')
-                badge = users_map[current_user_id].get('badge', current_user_id)
-            if uid and users_map and str(uid) in users_map:
-                info = users_map[str(uid)]
-                name = info.get('name', '')
-                badge = info.get('badge', str(uid))
-            if not badge:
-                badge = str(uid) if uid else current_user_id
-            attendance = Attendance(badge, ts, status, punch, uid, name, badge)
-            attendances.append(attendance)
-            att_data = att_data[rec_size:]
-        return attendances
+        Each TCP packet is framed as
+        ``MACHINE_PREPARE_DATA_1, MACHINE_PREPARE_DATA_2, length``
+        (8 bytes) followed by a ZK header (8 bytes) and ``length - 8``
+        bytes of payload. The function walks the byte stream and
+        extracts every payload it finds.
+        """
+        payload = b''
+        pos = 0
+        while pos < len(raw_data) - 8:
+            magic1, magic2, dsize = unpack('<HHI', raw_data[pos:pos + 8])
+            if (magic1 == const.MACHINE_PREPARE_DATA_1
+                    and magic2 == const.MACHINE_PREPARE_DATA_2
+                    and 0 < dsize <= len(raw_data) - pos):
+                zk_data = raw_data[pos + 16:pos + 8 + dsize]
+                payload += zk_data
+                pos += 8 + dsize
+            else:
+                pos += 1
+        return payload
+
+    def _wl10_read_raw_command(self, command_code):
+        """Send a command and read the entire response via raw recv.
+
+        Last-resort fallback for AK3750 firmwares whose TCP framing is
+        not understood by :meth:`__send_command`. It deliberately does
+        NOT update ``__session_id`` / ``__reply_id`` from the captured
+        packets -- doing so used to corrupt the session state and break
+        subsequent commands.
+        """
+        if not self.tcp:
+            return b''
+
+        for attempt in range(3):
+            buf = self.__create_header(command_code, b'', self.__session_id, self.__reply_id)
+            top = self.__create_tcp_top(buf)
+            try:
+                self.__sock.send(top)
+            except Exception as e:
+                if self.verbose:
+                    print(f'  [raw] send error: {e}')
+                return b''
+
+            all_raw = b''
+            self.__sock.settimeout(min(self.__timeout, 10))
+            try:
+                while True:
+                    chunk = self.__sock.recv(65536)
+                    if not chunk:
+                        break
+                    all_raw += chunk
+                    self.__sock.settimeout(1)
+            except timeout:
+                pass
+            except Exception as e:
+                if self.verbose:
+                    print(f'  [raw] recv error: {e}')
+            finally:
+                self.__sock.settimeout(self.__timeout)
+
+            if all_raw:
+                payload = self._wl10_extract_tcp_payloads(all_raw)
+                if self.verbose:
+                    print(f'  [raw] cmd={command_code} attempt={attempt + 1} '
+                          f'raw={len(all_raw)} payload={len(payload)}')
+                if payload and len(payload) >= 8:
+                    return payload
+                if self.verbose:
+                    print(f'  [raw] payload too small, retrying')
+
+        return b''
+
+    def _wl10_read_bulk_data(self, command_code, function_code=0):
+        """Read a bulk response from the WL10/AK3750 device.
+
+        The standard pyzk buffered read (``read_with_buffer``) does not
+        work reliably against this firmware: the device sends the
+        data in a single TCP packet whose length field under-reports
+        the actual payload, so the buffered reader truncates the
+        response. We therefore prefer the raw socket read, which
+        drains the socket until the device stops sending.
+
+        The returned buffer still has the 4-byte section header at the
+        start; callers strip it before parsing records.
+        """
+        if not self.wl10:
+            raise ZKErrorResponse('Not in WL10 mode')
+
+        # --- Strategy 1: raw socket read (the one that works) ---
+        if self.tcp:
+            try:
+                data = self._wl10_read_raw_command(command_code)
+                if data and len(data) >= 4:
+                    if self.verbose:
+                        print(f'  [wl10_bulk] strategy=raw len={len(data)}')
+                    return data
+            except Exception as e:
+                if self.verbose:
+                    print(f'  [wl10_bulk] strategy=raw failed: {e}')
+
+        # --- Strategy 2: standard buffered read (fallback) ---
+        try:
+            data, _size = self.read_with_buffer(command_code, function_code, 0)
+            if data and len(data) >= 4:
+                if self.verbose:
+                    print(f'  [wl10_bulk] strategy=buffered len={len(data)}')
+                return data
+        except Exception as e:
+            if self.verbose:
+                print(f'  [wl10_bulk] strategy=buffered failed: {e}')
+
+        return b''
+
+    @staticmethod
+    def _wl10_strip_header(raw_data, record_size):
+        """Strip the WL10 framing header and return ``(records, n)``.
+
+        The observed layout (reverse engineered from AK3750WIFI_TFT
+        firmware "Ver 6.60 May 19 2023") is::
+
+            4 bytes  outer header  (size of section header + records,
+                                    NOT including itself nor the
+                                    device field that follows)
+            4 bytes  device field  (a constant like 0x00009fb0 in our
+                                    captures; reserved/unused by us)
+            4 bytes  section header (byte count of the records
+                                    section, i.e. record_count *
+                                    record_size)
+            N*M bytes records
+
+        Returns ``(records_bytes, declared_record_count)``.
+        """
+        if not raw_data or len(raw_data) < 12:
+            return raw_data, len(raw_data) // record_size
+
+        outer = unpack('I', raw_data[:4])[0]
+        section = unpack('I', raw_data[8:12])[0]
+
+        # The standard 12-byte layout: section header at offset 8
+        # holds the byte count of the records that follow.
+        if (section == len(raw_data) - 12
+                and section % record_size == 0):
+            return raw_data[12:], section // record_size
+
+        # Variant: section header at offset 4 (4-byte form, e.g. when
+        # the read_with_buffer path returns the section header at the
+        # start).
+        if len(raw_data) >= 8:
+            section4 = unpack('I', raw_data[4:8])[0]
+            if (section4 == len(raw_data) - 8
+                    and section4 % record_size == 0):
+                return raw_data[8:], section4 // record_size
+
+        # Last resort: the first 4 bytes are a record count.
+        if outer <= (len(raw_data) - 4) // record_size:
+            return raw_data[4:], outer
+
+        return raw_data, len(raw_data) // record_size
+
+    def _wl10_get_users(self):
+        """Read and parse the user table from the device."""
+        raw = self._wl10_read_bulk_data(const.CMD_USERTEMP_RRQ, const.FCT_USER)
+        return self._wl10_parse_users(raw)
 
     def _wl10_get_attendance(self):
-        raw_data = self._wl10_read_attlog_buffered()
+        """Read and parse the attendance log from the device.
+
+        Users are read first so that we can resolve names / badges for
+        every attendance record even if the second read disrupts the
+        socket (which happens on some AK3750 firmwares).
+        """
         users = self._wl10_get_users()
+        users_map = self._wl10_build_users_map(users)
+
+        # After the user bulk read the device sometimes needs a
+        # CMD_FREE_DATA + small pause before it will service the
+        # next bulk command. Try them in sequence with retries.
+        raw = b''
+        for _ in range(3):
+            try:
+                self.free_data()
+            except Exception:
+                pass
+            raw = self._wl10_read_bulk_data(const.CMD_ATTLOG_RRQ, const.FCT_ATTLOG)
+            if raw and len(raw) >= 8:
+                break
+
+        return self._wl10_parse_attendance(raw, users_map)
+
+    @staticmethod
+    def _wl10_build_users_map(users):
+        """Index a list of :class:`User` objects by uid and user_id."""
         users_map = {}
         for u in users:
-            key = u.user_id if u.user_id else str(u.uid)
-            users_map[key] = {'name': u.name, 'badge': key, 'uid': u.uid}
-            users_map[str(u.uid)] = {'name': u.name, 'badge': key, 'uid': u.uid}
-        return self._wl10_parse_attendance(raw_data, users_map)
+            if not u or u.uid is None:
+                continue
+            entry = {'name': u.name or '', 'badge': u.user_id or str(u.uid), 'uid': u.uid}
+            if u.user_id:
+                users_map[u.user_id] = entry
+            users_map[str(u.uid)] = entry
+        return users_map
+
+    def _wl10_parse_users(self, raw_data):
+        """Parse the user table from a WL10 device.
+
+        The 4-byte section header is stripped first; the remaining
+        bytes are interpreted as standard 72-byte pyzk user records
+        (same layout as the rest of pyzk for the ZK8 72-byte variant).
+        """
+        records, n_declared = self._wl10_strip_header(
+            raw_data, const.WL10_USER_RECORD_SIZE)
+        if not records:
+            return []
+
+        rec_size = const.WL10_USER_RECORD_SIZE
+        n = min(n_declared, len(records) // rec_size)
+        users = []
+        seen = set()
+
+        for i in range(n):
+            rec = records[i * rec_size:(i + 1) * rec_size]
+            user = self._wl10_decode_user_record(rec)
+            if user is None:
+                continue
+            if user.uid in seen:
+                # Deduplicate by uid -- some firmwares emit the same
+                # user twice when they have a fingerprint registered.
+                continue
+            seen.add(user.uid)
+            users.append(user)
+
+        if self.verbose:
+            print(f'  [wl10_users] parsed {len(users)} users from {n} records')
+        return users
+
+    def _wl10_decode_user_record(self, rec):
+        """Decode a single 72-byte user record using the standard layout.
+
+        Layout (matches the upstream pyzk 72-byte user format and the
+        Wireshark ``zk6.lua`` dissector):
+            0-1   uid (uint16 LE)
+            2     privilege (uint8)            0=user, 14=admin
+            3-10  password (8 bytes)
+            11-34 name (24 bytes, ASCII)
+            35-38 card (uint32 LE)
+            39    padding
+            40-46 group_id (7 bytes)
+            47    padding
+            48-71 user_id / badge (24 bytes, ASCII)
+
+        Some AK3750 firmwares emit a "linking" record (a sidecar to
+        the user table that links a user to a fingerprint template)
+        which carries the user_id at a non-standard offset. When the
+        standard fields are empty, we scan the whole record for a
+        plausible 3-5 digit numeric string to use as the user_id.
+
+        Returns ``None`` for empty records. Records with a valid uid
+        but no name get a synthetic ``NN-<uid>`` placeholder.
+        """
+        uid = unpack('<H', rec[0:2])[0]
+        privilege = rec[2]
+        password = rec[3:11].split(b'\x00', 1)[0].decode(self.encoding, errors='ignore')
+        name = rec[11:35].split(b'\x00', 1)[0].decode(self.encoding, errors='ignore').strip()
+        card = unpack('<I', rec[35:39])[0]
+        group_id = rec[40:47].split(b'\x00', 1)[0].decode(self.encoding, errors='ignore')
+        user_id = rec[48:72].split(b'\x00', 1)[0].decode(self.encoding, errors='ignore').strip()
+
+        # Linking-record fallback: if the record has no name (it's a
+        # fingerprint sidecar rather than a full user record), the
+        # standard user_id field at bytes 48-71 holds garbage. Scan
+        # the whole record for a 3-5 digit numeric user_id that
+        # appears in one of the secondary offsets used by linking
+        # records.
+        if not name or (user_id and not user_id.isdigit()):
+            fallback = self._wl10_scan_user_id(rec)
+            if fallback:
+                user_id = fallback
+
+        if not user_id:
+            user_id = str(uid) if uid else ''
+
+        if not name:
+            if not uid:
+                return None
+            name = f'NN-{user_id}'
+
+        return User(uid, name, privilege, password, group_id, user_id, card)
+
+    @staticmethod
+    def _wl10_scan_user_id(rec):
+        """Scan a 72-byte record for a 3-5 digit ASCII user_id.
+
+        Used as a fallback when the standard ``user_id`` field is
+        empty (the device emitted a "linking" record instead of a
+        full user record).
+        """
+        for off in range(0, len(rec) - 3):
+            length = 0
+            for end in range(off, min(off + 6, len(rec))):
+                if 0x30 <= rec[end] <= 0x39:
+                    length += 1
+                else:
+                    break
+            if 3 <= length <= 5:
+                # Ensure the character after the run is a null or
+                # outside the digit range (boundary check) so we
+                # don't pick up partial numbers from the binary
+                # header.
+                after = rec[off + length] if off + length < len(rec) else 0
+                if after in (0, 0x20) or after < 0x30 or after > 0x39:
+                    return rec[off:off + length].decode('ascii')
+        return ''
+
+    def _wl10_parse_attendance(self, raw_data, users_map=None):
+        """Parse the attendance log from a WL10 device.
+
+        The 4-byte section header is stripped first; the remaining
+        bytes are interpreted as 22-byte records using the WL10 layout
+        documented in the module docstring of this class.
+        """
+        records, n_declared = self._wl10_strip_header(
+            raw_data, const.WL10_ATT_RECORD_SIZE)
+        if not records:
+            return []
+
+        rec_size = const.WL10_ATT_RECORD_SIZE
+        n = min(n_declared, len(records) // rec_size)
+        attendances = []
+        now_year = datetime.now().year
+        min_year = 2020
+        max_year = now_year + 1
+
+        for i in range(n):
+            rec = records[i * rec_size:(i + 1) * rec_size]
+            uid = unpack('<H', rec[0:2])[0]
+            user_id_raw = rec[2:8].split(b'\x00', 1)[0].decode('ascii', errors='ignore')
+            ts = unpack('<I', rec[13:17])[0]
+            status = rec[17]
+
+            dt = self._decode_zk_time(ts) if ts else None
+            if dt is None or not (min_year <= dt.year <= max_year):
+                # Skip records with invalid or out-of-range timestamps
+                # (e.g. 0x00000000 from a freshly-formatted device, or
+                # future-dated records from clock drift).
+                continue
+
+            name = ''
+            badge = user_id_raw or str(uid)
+            if users_map:
+                # Try user_id first (it's the actual badge number that
+                # employees use to clock in), then fall back to uid.
+                for key in (user_id_raw, str(uid)) if user_id_raw else (str(uid),):
+                    if key in users_map:
+                        info = users_map[key]
+                        name = info.get('name', '') or name
+                        badge = info.get('badge', badge) or badge
+                        break
+
+            attendances.append(Attendance(badge, dt, status, 0, uid, name, badge))
+
+        if self.verbose:
+            print(f'  [wl10_att] parsed {len(attendances)} records from {n} candidate records')
+        return attendances
+
+    # --- Public API ----------------------------------------------------
 
     def wl10_get_users(self):
+        """Public wrapper around :meth:`_wl10_get_users`."""
         if not self.wl10:
-            raise ZKErrorResponse("Not in WL10 mode. Call with wl10=True")
+            raise ZKErrorResponse('Not in WL10 mode. Call with wl10=True')
         users = self._wl10_get_users()
         self.users = len(users)
         return users
 
     def wl10_get_attendance(self):
+        """Public wrapper around :meth:`_wl10_get_attendance`."""
         if not self.wl10:
-            raise ZKErrorResponse("Not in WL10 mode. Call with wl10=True")
+            raise ZKErrorResponse('Not in WL10 mode. Call with wl10=True')
         attendances = self._wl10_get_attendance()
         self.records = len(attendances)
         return attendances
@@ -1452,10 +1767,30 @@ class ZK(object):
         return b''.join(data), start
 
     def get_attendance(self):
+        # Save original mode for restoration
+        saved_wl10 = self.wl10
+        
         if self.wl10:
-            return self._wl10_get_attendance()
-        self.read_sizes()
+            # Try WL10 method first
+            attendances = self._wl10_get_attendance()
+            if attendances:
+                self.records = len(attendances)
+                return attendances
+            # WL10 returned empty - temporarily switch to standard method
+            if self.verbose:
+                print("WL10 attendance returned empty, trying standard method...")
+            self.wl10 = False
+        
+        try:
+            self.read_sizes()
+        except Exception as e:
+            if self.verbose:
+                print(f"read_sizes failed: {e}")
+            self.wl10 = saved_wl10
+            return []
+        
         if self.records == 0:
+            self.wl10 = saved_wl10
             return []
         users = self.get_users()
         if self.verbose:
@@ -1519,6 +1854,8 @@ class ZK(object):
                 attendance = Attendance(user_id, timestamp, status, punch, uid)
                 attendances.append(attendance)
                 attendance_data = attendance_data[40:]
+        # Restore saved mode
+        self.wl10 = saved_wl10
         return attendances
 
     def clear_attendance(self):
