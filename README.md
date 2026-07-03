@@ -20,14 +20,7 @@ The user record layout was similarly wrong: the previous code read
 the device uses the **standard pyzk 72-byte layout** with `uid` as 2
 bytes at offset 0 and `name` at offset 11.
 
-## Verified counts
 
-| Device          | Users | Admins (priv=14) | Attendance records |
-|-----------------|------:|-----------------:|--------------------:|
-| 192.168.180.201 | 18    | 2                | 543                 |
-| 192.168.170.40  | 27    | 4                | 1058                |
-
-## Reverse-engineered protocol
 
 ### Bulk response framing
 
