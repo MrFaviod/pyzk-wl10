@@ -90,6 +90,30 @@ so the buffered reader truncates the response. We therefore prefer the
 until the device stops sending, and only fall back to the standard
 buffered read if that yields nothing.
 
+### Write strategy
+
+The existing fork already implemented the **bulk read** (CMD=9 / USERTEMP_RRQ
+via raw socket).  What was missing was the write path; this is implemented
+by **CMD=8 (CMD_USER_WRQ)** with a 72-byte payload in the same
+`HB8s24s4sx7sx24s` layout used for reads.  The device responds with a
+simple ACK (CMD_ACK_OK=2000) — no buffered write sequence is needed.
+
+| Operation      | Command              | Payload           | Response               | Status     |
+|----------------|----------------------|-------------------|------------------------|------------|
+| Write user     | CMD=8 (USER_WRQ)     | 72-byte record    | ACK_OK=2000            | **New**    |
+| Delete user    | CMD=18 (DELETE_USER) | `pack('<h', uid)` | ACK_OK=2000​¹           | **New**    |
+| Bulk read      | CMD=9 (USERTEMP_RRQ) | (empty)           | PREPARE_DATA=1500+N*72 | Existing   |
+| Housekeeping   | CMD=1013 REFRESHDATA | (empty)           | ACK_OK                 | Existing   |
+
+¹ Deletion is confirmed to return ACK_OK on the AK3750, but does **not**
+persist to flash on the tested firmware (Ver 6.60).  The `wl10_delete_user`
+method is provided for firmware versions where it works; on this one it
+will return ``True`` while leaving the user on the device.
+
+Writes (and the existing bulk reads) go through the raw TCP path rather
+than `__send_command`, because the standard buffered protocol does not
+work with this firmware.
+
 ## Usage
 
 ```python
@@ -101,6 +125,13 @@ zk.connect()
 
 users = zk.wl10_get_users()         # list[User]
 attendance = zk.wl10_get_attendance()  # list[Attendance]
+
+# Write a new user (privilege 0 = USER_DEFAULT, 14 = USER_ADMIN)
+zk.wl10_set_user(uid=200, name='Alice', privilege=0,
+                 user_id='999950', card=0)
+
+# Delete a user (may return True but still leave the user on some FW)
+zk.wl10_delete_user(uid=200)
 
 print(f'{len(users)} users, {len(attendance)} attendance records')
 zk.disconnect()
@@ -130,15 +161,20 @@ $ python3 listar_marcaciones.py <DEVICE_IP> --since 2026-07-01
 ```
 .
 ├── listar_marcaciones.py   # CLI tool to dump attendance records
-└── pyzk_wl10/             # the library
-    └── zk/
-        ├── __init__.py
-        ├── attendance.py
-        ├── base.py        # ZK class + WL10 methods (most of the code)
-        ├── const.py       # protocol constants
-        ├── exception.py
-        ├── finger.py
-        └── user.py
+├── wl10_probe_write.py     # Interactive probe for the write protocol
+├── pyzk_wl10/              # the library
+│   └── zk/
+│       ├── __init__.py
+│       ├── attendance.py
+│       ├── base.py         # ZK class + WL10 read/write methods
+│       ├── const.py        # protocol constants
+│       ├── exception.py
+│       ├── finger.py
+│       ├── user.py
+│       └── tests/          # 49 pytest tests
+│           ├── conftest.py
+│           ├── helpers.py
+│           └── test_*.py
 ```
 
 ## Changelog vs the original fork
@@ -161,3 +197,9 @@ $ python3 listar_marcaciones.py <DEVICE_IP> --since 2026-07-01
   contained the failed reverse-engineering attempts — the bugs they
   were chasing are now fixed.
 * **Updated** `const.WL10_ATT_RECORD_SIZE` from `28` to `22`.
+* **Added** `wl10_set_user` and `wl10_delete_user` — the write path
+  reverse-engineered from the AK3750 firmware.  CMD=8 (USER_WRQ) with
+  72-byte payload writes the user; CMD=18 (DELETE_USER) deletes it
+  (persistence depends on FW version).
+* **Added** 10 unit tests for the new write/delete methods, bringing
+  the total to 49 tests.

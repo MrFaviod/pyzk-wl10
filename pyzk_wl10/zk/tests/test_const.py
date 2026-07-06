@@ -26,3 +26,5 @@ class TestConst:
         inst = object.__new__(ZK)
         assert hasattr(inst, 'wl10_get_users')
         assert hasattr(inst, 'wl10_get_attendance')
+        assert hasattr(inst, 'wl10_set_user')
+        assert hasattr(inst, 'wl10_delete_user')
