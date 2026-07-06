@@ -1080,6 +1080,155 @@ class ZK(object):
         self.records = len(attendances)
         return attendances
 
+    def _wl10_read_ack(self):
+        """Read a simple ACK response from the device via raw recv.
+
+        ACK responses have ``dsize=8`` (only the ZK header, no body),
+        unlike bulk-read responses where ``dsize >= 16``.  The helper
+        ``_wl10_extract_tcp_payloads`` requires ``dsize >= 16`` and
+        therefore returns empty for ACKs, so we parse the response here.
+
+        Returns the ``cmd`` field of the ZK header, or ``0`` on failure.
+        """
+        raw = b''
+        self.__sock.settimeout(min(self.__timeout, 5))
+        try:
+            while True:
+                chunk = self.__sock.recv(65536)
+                if not chunk:
+                    break
+                raw += chunk
+                self.__sock.settimeout(1)
+        except timeout:
+            pass
+        finally:
+            self.__sock.settimeout(self.__timeout)
+
+        if len(raw) < 16:
+            return 0
+        _, _, dsize = unpack('<HHI', raw[:8])
+        if dsize < 8:
+            return 0
+        return unpack('<H', raw[8:10])[0]
+
+    def wl10_set_user(self, uid=None, name='', privilege=0, password='',
+                      group_id='', user_id='', card=0):
+        """Write a user to the WL10/AK3750 device.
+
+        Uses the raw TCP send/recv path (not ``__send_command``) because
+        the WL10 firmware does not respond to the standard buffered write
+        sequence.
+
+        Parameters match :meth:`set_user`::
+
+            zk.wl10_set_user(uid=200, name='Alice', privilege=0,
+                             user_id='999950', card=0)
+
+        Returns ``True`` if the device ACKed the write.
+        Raises :class:`ZKErrorResponse` on failure.
+        """
+        if not self.wl10:
+            raise ZKErrorResponse('Not in WL10 mode. Call with wl10=True')
+
+        if not self.tcp:
+            raise ZKErrorResponse('WL10 write requires TCP mode')
+
+        if uid is None:
+            uid = self.next_uid
+            if not user_id:
+                user_id = self.next_user_id
+        if not user_id:
+            user_id = str(uid)
+        if privilege not in (const.USER_DEFAULT, const.USER_ADMIN):
+            privilege = const.USER_DEFAULT
+        privilege = int(privilege)
+
+        name_pad = name.encode(self.encoding, errors='ignore').ljust(24, b'\x00')[:24]
+        card_str = pack('<I', int(card))[:4]
+        command_string = pack('HB8s24s4sx7sx24s',
+                             uid, privilege,
+                             password.encode(self.encoding, errors='ignore'),
+                             name_pad, card_str,
+                             group_id.encode(), user_id.encode())
+
+        if len(command_string) != const.WL10_USER_RECORD_SIZE:
+            raise ZKErrorResponse(
+                f'User record must be {const.WL10_USER_RECORD_SIZE}B, '
+                f'got {len(command_string)}B')
+
+        buf = self.__create_header(const.CMD_USER_WRQ, command_string,
+                                   self.__session_id, self.__reply_id)
+        top = self.__create_tcp_top(buf)
+
+        for attempt in range(2):
+            try:
+                self.__sock.send(top)
+            except Exception as e:
+                if self.verbose:
+                    print(f'  [wl10_set_user] send error: {e}')
+                raise ZKErrorResponse(f'Failed to send user: {e}')
+
+            cmd = self._wl10_read_ack()
+            if cmd:
+                if cmd == const.CMD_ACK_OK:
+                    self.refresh_data()
+                    if self.next_uid == uid:
+                        self.next_uid += 1
+                    if self.next_user_id == user_id:
+                        self.next_user_id = str(self.next_uid)
+                    return True
+                msg = {const.CMD_ACK_ERROR: 'ACK_ERROR',
+                       const.CMD_ACK_UNAUTH: 'UNAUTH'}.get(cmd, f'UNKNOWN({cmd})')
+                raise ZKErrorResponse(f'Device rejected write: {msg}')
+        raise ZKErrorResponse('No response from device')
+
+    def wl10_delete_user(self, uid=0, user_id=''):
+        """Delete a user from the WL10/AK3750 device.
+
+        Parameters match :meth:`delete_user`::
+
+            zk.wl10_delete_user(uid=200)
+            zk.wl10_delete_user(user_id='999950')
+
+        Returns ``True`` if the device ACKed the deletion.
+        """
+        if not self.wl10:
+            raise ZKErrorResponse('Not in WL10 mode. Call with wl10=True')
+
+        if not self.tcp:
+            raise ZKErrorResponse('WL10 delete requires TCP mode')
+
+        if not uid:
+            users = self._wl10_get_users()
+            users = list(filter(lambda x: x.user_id == str(user_id), users))
+            if not users:
+                return False
+            uid = users[0].uid
+
+        command_string = pack('<h', uid)
+
+        buf = self.__create_header(const.CMD_DELETE_USER, command_string,
+                                   self.__session_id, self.__reply_id)
+        top = self.__create_tcp_top(buf)
+
+        for attempt in range(2):
+            try:
+                self.__sock.send(top)
+            except Exception as e:
+                if self.verbose:
+                    print(f'  [wl10_delete_user] send error: {e}')
+                raise ZKErrorResponse(f'Failed to send delete: {e}')
+
+            cmd = self._wl10_read_ack()
+            if cmd:
+                if cmd == const.CMD_ACK_OK:
+                    self.refresh_data()
+                    if uid == (self.next_uid - 1):
+                        self.next_uid = uid
+                    return True
+                return False
+        return False
+
     # ================== End WL10 Specific Methods ==================
 
     def set_user(self, uid=None, name='', privilege=0, password='', group_id='', user_id='', card=0):
