@@ -41,6 +41,8 @@ def _build_wl10_zk(ack_cmd=const.CMD_ACK_OK, ack_rid=100):
     # Mocked refresh_data so it doesn't call __send_command (which
     # expects a real socket).  We're testing our own raw path only.
     inst.refresh_data = MagicMock(return_value=True)
+    # Mock _wl10_get_users to prevent network calls in delete tests
+    inst._wl10_get_users = MagicMock(return_value=[])
     return inst
 
 
