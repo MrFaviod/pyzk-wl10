@@ -1121,6 +1121,29 @@ class ZK(object):
         cmd, _cksum, _sid, rid = unpack('<4H', raw[8:16])
         return cmd, rid
 
+    def _wl10_refresh_data(self):
+        """Send CMD_REFRESHDATA via raw TCP path and wait for ACK.
+
+        The standard ``refresh_data()`` uses ``__send_command`` which
+        doesn't work reliably with WL10 bulk responses.  This helper
+        uses the raw TCP path instead.
+        """
+        buf = self.__create_header(const.CMD_REFRESHDATA, b'',
+                                   self.__session_id, self.__reply_id)
+        top = self.__create_tcp_top(buf)
+        try:
+            self.__sock.send(top)
+        except Exception as e:
+            if self.verbose:
+                print(f'  [wl10_refresh] send error: {e}')
+            return False
+
+        cmd, ack_rid = self._wl10_read_ack()
+        if cmd:
+            self.__reply_id = ack_rid
+            return cmd == const.CMD_ACK_OK
+        return False
+
     def wl10_set_user(self, uid=None, name='', privilege=0, password='',
                       group_id='', user_id='', card=0):
         """Write a user to the WL10/AK3750 device.
@@ -1166,6 +1189,9 @@ class ZK(object):
                 f'User record must be {const.WL10_USER_RECORD_SIZE}B, '
                 f'got {len(command_string)}B')
 
+        # Settle device state before write (firmware requirement)
+        self._wl10_refresh_data()
+
         buf = self.__create_header(const.CMD_USER_WRQ, command_string,
                                    self.__session_id, self.__reply_id)
         top = self.__create_tcp_top(buf)
@@ -1182,7 +1208,7 @@ class ZK(object):
             if cmd:
                 self.__reply_id = ack_rid
                 if cmd == const.CMD_ACK_OK:
-                    self.refresh_data()
+                    self._wl10_refresh_data()
                     if self.next_uid == uid:
                         self.next_uid += 1
                     if self.next_user_id == user_id:
@@ -1218,6 +1244,9 @@ class ZK(object):
 
         command_string = pack('<h', uid)
 
+        # Settle device state before delete (firmware requirement)
+        self._wl10_refresh_data()
+
         buf = self.__create_header(const.CMD_DELETE_USER, command_string,
                                    self.__session_id, self.__reply_id)
         top = self.__create_tcp_top(buf)
@@ -1234,7 +1263,7 @@ class ZK(object):
             if cmd:
                 self.__reply_id = ack_rid
                 if cmd == const.CMD_ACK_OK:
-                    self.refresh_data()
+                    self._wl10_refresh_data()
                     if uid == (self.next_uid - 1):
                         self.next_uid = uid
                     return True
