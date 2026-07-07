@@ -1088,7 +1088,16 @@ class ZK(object):
         ``_wl10_extract_tcp_payloads`` requires ``dsize >= 16`` and
         therefore returns empty for ACKs, so we parse the response here.
 
-        Returns the ``cmd`` field of the ZK header, or ``0`` on failure.
+        Returns ``(cmd, reply_id)`` where ``cmd`` is the command field
+        of the ZK header and ``reply_id`` is the echoed reply_id
+        (valid for ACK_OK / ACK_ERROR responses).  Returns ``(0, 0)``
+        on failure.
+
+        The caller should update ``self.__reply_id`` from the returned
+        value so that subsequent commands stay in sync with the device —
+        without this, chaining two writes without an intervening
+        ``refresh_data()`` used to send a stale ``reply_id`` and the
+        device would respond with ``ACK_ERROR``.
         """
         raw = b''
         self.__sock.settimeout(min(self.__timeout, 5))
@@ -1105,11 +1114,12 @@ class ZK(object):
             self.__sock.settimeout(self.__timeout)
 
         if len(raw) < 16:
-            return 0
+            return 0, 0
         _, _, dsize = unpack('<HHI', raw[:8])
         if dsize < 8:
-            return 0
-        return unpack('<H', raw[8:10])[0]
+            return 0, 0
+        cmd, _cksum, _sid, rid = unpack('<4H', raw[8:16])
+        return cmd, rid
 
     def wl10_set_user(self, uid=None, name='', privilege=0, password='',
                       group_id='', user_id='', card=0):
@@ -1168,8 +1178,9 @@ class ZK(object):
                     print(f'  [wl10_set_user] send error: {e}')
                 raise ZKErrorResponse(f'Failed to send user: {e}')
 
-            cmd = self._wl10_read_ack()
+            cmd, ack_rid = self._wl10_read_ack()
             if cmd:
+                self.__reply_id = ack_rid
                 if cmd == const.CMD_ACK_OK:
                     self.refresh_data()
                     if self.next_uid == uid:
@@ -1219,8 +1230,9 @@ class ZK(object):
                     print(f'  [wl10_delete_user] send error: {e}')
                 raise ZKErrorResponse(f'Failed to send delete: {e}')
 
-            cmd = self._wl10_read_ack()
+            cmd, ack_rid = self._wl10_read_ack()
             if cmd:
+                self.__reply_id = ack_rid
                 if cmd == const.CMD_ACK_OK:
                     self.refresh_data()
                     if uid == (self.next_uid - 1):
