@@ -112,3 +112,27 @@ MACHINE_PREPARE_DATA_2 = 32130
 
 WL10_USER_RECORD_SIZE = 72
 WL10_ATT_RECORD_SIZE = 22
+
+# Attendance record status byte (WL10 22B layout, offset 17):
+# numeric punch state -- firmware may remap these depending on the
+# function-key configuration, so treat as best-effort labels.
+WL10_PUNCH_STATES = {
+    0: 'Check-In',        # entrada
+    1: 'Check-Out',       # salida
+    2: 'Break-Out',       # salida a pausa
+    3: 'Break-In',        # vuelta de pausa
+    4: 'Overtime-In',     # entrada extra
+    5: 'Overtime-Out',    # salida extra
+}
+
+# User record verify-mode byte (WL10 72B layout, offset 39):
+# controls how the terminal authenticates the user at the reader and
+# at the admin MENU. Real admin records on AK3750WIFI_TFT Ver 6.60
+# store 0x01 here; the fork previously wrote 0x00 (pad) which left
+# admins unable to authenticate at the menu.
+WL10_VERIFY_MODES = {
+    0: 'Password',      # teclear contraseña numérica
+    1: 'Fingerprint',   # huella dactilar
+    2: 'Card',          # tarjeta RF
+}
+WL10_VERIFY_DEFAULT = 1  # Fingerprint -- matches real admin records

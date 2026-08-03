@@ -100,6 +100,41 @@ class TestWl10SetUserPayload:
         payload = _first_send_payload(inst._ZK__sock)
         assert payload[2] == USER_ADMIN, f'Expected {USER_ADMIN}, got {payload[2]}'
 
+    def test_verify_mode_default_is_fingerprint(self):
+        """Offset 39 (verify-mode byte) must default to 1 (Fingerprint)
+        to match the on-wire layout of real admin records on WL10 Ver 6.60."""
+        inst = _build_wl10_zk()
+        inst.wl10_set_user(uid=1, privilege=USER_ADMIN, user_id='999953')
+        payload = _first_send_payload(inst._ZK__sock)
+        assert payload[39] == 1, \
+            f'Expected verify_mode=1 (Fingerprint) at offset 39, got {payload[39]}'
+
+    def test_verify_mode_password_explicit(self):
+        """verify_mode=0 (Password) must write 0x00 at offset 39."""
+        inst = _build_wl10_zk()
+        inst.wl10_set_user(uid=1, privilege=USER_ADMIN,
+                           user_id='999954', verify_mode=0)
+        payload = _first_send_payload(inst._ZK__sock)
+        assert payload[39] == 0, \
+            f'Expected verify_mode=0 (Password) at offset 39, got {payload[39]}'
+
+    def test_verify_mode_card_explicit(self):
+        """verify_mode=2 (Card) must write 0x02 at offset 39."""
+        inst = _build_wl10_zk()
+        inst.wl10_set_user(uid=1, privilege=USER_DEFAULT,
+                           user_id='999955', verify_mode=2)
+        payload = _first_send_payload(inst._ZK__sock)
+        assert payload[39] == 2, \
+            f'Expected verify_mode=2 (Card) at offset 39, got {payload[39]}'
+
+    def test_verify_mode_invalid_clamps_to_default(self):
+        """Invalid verify_mode values clamp to the default (1=Fingerprint)."""
+        inst = _build_wl10_zk()
+        inst.wl10_set_user(uid=1, user_id='999956', verify_mode=99)
+        payload = _first_send_payload(inst._ZK__sock)
+        assert payload[39] == 1, \
+            f'Expected invalid verify_mode to clamp to 1, got {payload[39]}'
+
 
 class TestWl10SetUserResponse:
     """Verify ACK response handling and reply_id synchronization."""

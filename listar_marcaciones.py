@@ -7,6 +7,21 @@ from zk import ZK
 import argparse
 from datetime import datetime, date
 
+# Traducción al español del label canónico del estado (ver Attendance.status_label)
+STATUS_ES = {
+    'Check-In': 'Entrada',
+    'Check-Out': 'Salida',
+    'Break-Out': 'Salida-Pausa',
+    'Break-In': 'Entrada-Pausa',
+    'Overtime-In': 'Entrada-Extra',
+    'Overtime-Out': 'Salida-Extra',
+}
+
+
+def status_display(a):
+    label = a.status_label if hasattr(a, 'status_label') else ''
+    return STATUS_ES.get(label, str(a.status))
+
 
 def main():
     parser = argparse.ArgumentParser(description='Listar marcaciones desde dispositivo ZK')
@@ -43,8 +58,8 @@ def main():
     if args.csv:
         print("Badge,Nombre,Fecha,Hora,Status,Punch")
     else:
-        print(f"{'Badge':>8} | {'Nombre':<30} | {'Fecha/Hora':<22} | {'Status':<6} | {'Punch':<5}")
-        print("-" * 80)
+        print(f"{'Badge':>8} | {'Nombre':<30} | {'Fecha/Hora':<22} | {'Status':<13} | {'Punch':<5}")
+        print("-" * 88)
 
     for a in attendance:
         if a.timestamp:
@@ -55,12 +70,13 @@ def main():
                 continue
             if a.timestamp.year > max_year:
                 continue
-            
+
             ts = a.timestamp.strftime('%Y-%m-%d %H:%M:%S')
+            status = status_display(a)
             if args.csv:
-                print(f"{a.badge},{a.name},{a.timestamp.strftime('%Y-%m-%d')},{a.timestamp.strftime('%H:%M:%S')},{a.status},{a.punch}")
+                print(f"{a.badge},{a.name},{a.timestamp.strftime('%Y-%m-%d')},{a.timestamp.strftime('%H:%M:%S')},{status},{a.punch}")
             else:
-                print(f"{a.badge:>8} | {a.name:<30} | {ts:<22} | {a.status:<6} | {a.punch:<5}")
+                print(f"{a.badge:>8} | {a.name:<30} | {ts:<22} | {status:<13} | {a.punch:<5}")
 
     zk.disconnect()
 
