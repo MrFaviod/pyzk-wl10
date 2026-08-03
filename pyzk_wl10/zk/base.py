@@ -1145,7 +1145,8 @@ class ZK(object):
         return False
 
     def wl10_set_user(self, uid=None, name='', privilege=0, password='',
-                      group_id='', user_id='', card=0):
+                      group_id='', user_id='', card=0,
+                      verify_mode=const.WL10_VERIFY_DEFAULT):
         """Write a user to the WL10/AK3750 device.
 
         Uses the raw TCP send/recv path (not ``__send_command``) because
@@ -1156,6 +1157,13 @@ class ZK(object):
 
             zk.wl10_set_user(uid=200, name='Alice', privilege=0,
                              user_id='999950', card=0)
+
+        :param verify_mode: authentication method the terminal uses for
+            this user at the reader and the admin MENU. See
+            :data:`zk.const.WL10_VERIFY_MODES`. Default ``1`` (Fingerprint)
+            to match real admin records on AK3750WIFI_TFT Ver 6.60;
+            ``0`` = Password, ``2`` = Card. Invalid values clamp to
+            the default.
 
         Returns ``True`` if the device ACKed the write.
         Raises :class:`ZKErrorResponse` on failure.
@@ -1175,13 +1183,16 @@ class ZK(object):
         if privilege not in (const.USER_DEFAULT, const.USER_ADMIN):
             privilege = const.USER_DEFAULT
         privilege = int(privilege)
+        if verify_mode not in const.WL10_VERIFY_MODES:
+            verify_mode = const.WL10_VERIFY_DEFAULT
+        verify_mode = int(verify_mode)
 
         name_pad = name.encode(self.encoding, errors='ignore').ljust(24, b'\x00')[:24]
         card_str = pack('<I', int(card))[:4]
-        command_string = pack('HB8s24s4sx7sx24s',
+        command_string = pack('HB8s24s4sB7sx24s',
                              uid, privilege,
                              password.encode(self.encoding, errors='ignore'),
-                             name_pad, card_str,
+                             name_pad, card_str, verify_mode,
                              group_id.encode(), user_id.encode())
 
         if len(command_string) != const.WL10_USER_RECORD_SIZE:

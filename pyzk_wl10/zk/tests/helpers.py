@@ -23,15 +23,20 @@ FIXTURES_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')
 
 
 def pack_user_record(uid, privilege=0, password=b'', name=b'', card=0,
-                     group_id=b'', user_id=b''):
-    """Pack a single 72-byte pyzk/WL10 user record."""
+                     group_id=b'', user_id=b'', verify_mode=1):
+    """Pack a single 72-byte pyzk/WL10 user record.
+
+    ``verify_mode`` (offset 39) defaults to 1 (Fingerprint) to match
+    real admin records on AK3750WIFI_TFT Ver 6.60; pass 0 for Password
+    or 2 for Card.
+    """
     password = password.ljust(8, b'\x00')[:8]
     name = name.ljust(24, b'\x00')[:24]
     group_id = group_id.ljust(7, b'\x00')[:7]
     user_id = user_id.ljust(24, b'\x00')[:24]
-    return struct.pack('<HB8s24sIx7sx24s',
+    return struct.pack('<HB8s24sIB7sx24s',
                        uid, privilege, password, name, card,
-                       group_id, user_id)
+                       verify_mode, group_id, user_id)
 
 
 def pack_attendance_record(uid, user_id, flag=1, timestamp=0, status=0):

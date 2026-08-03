@@ -72,3 +72,27 @@ class TestParseAttendance:
         atts = zk_instance._wl10_parse_attendance(raw)
         assert len(atts) == 1, 'Only the valid record should survive'
         assert atts[0].uid == 138
+
+    def test_parse_status_label_maps_numbers(self, zk_instance):
+        """status byte is a numeric punch state; label must map to a name."""
+        ts = encode_zk_time(datetime(2026, 7, 1, 14, 5, 38))
+        cases = [
+            (0, 'Check-In'),      # entrada
+            (1, 'Check-Out'),     # salida
+            (2, 'Break-Out'),
+            (3, 'Break-In'),
+            (4, 'Overtime-In'),   # observado en 192.168.170.40
+            (5, 'Overtime-Out'),
+            (99, 'Unknown'),
+        ]
+        for status, expected in cases:
+            rec = pack_attendance_record(
+                uid=26, user_id=b'26', flag=1, timestamp=ts, status=status)
+            raw = pack_bulk_response(rec, WL10_ATT_RECORD_SIZE)
+            atts = zk_instance._wl10_parse_attendance(raw)
+            assert len(atts) == 1
+            a = atts[0]
+            assert a.status == status, 'raw numeric status must be preserved'
+            assert a.status_label == expected, (
+                f'status {status} should map to {expected!r}, got {a.status_label!r}'
+            )
