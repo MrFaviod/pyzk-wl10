@@ -28,15 +28,13 @@ Usage:
     python3 wl10_probe_write.py <DEVICE_IP> [--port 4370] [--password 0] [--verbose]
 """
 
-import sys
 import os
 import socket
-import time
+import sys
 from struct import pack, unpack
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pyzk_wl10'))
 from zk import const
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -63,15 +61,15 @@ CMD_PREPARE_DATA  = const.CMD_PREPARE_DATA   # 1500
 # ---------------------------------------------------------------------------
 
 def create_checksum(buf):
-    l = len(buf)
+    length = len(buf)
     checksum = 0
-    while l > 1:
+    while length > 1:
         checksum += unpack('H', pack('BB', buf[0], buf[1]))[0]
         buf = buf[2:]
         if checksum > USHRT_MAX:
             checksum -= USHRT_MAX
-        l -= 2
-    if l:
+        length -= 2
+    if length:
         checksum += buf[-1]
     while checksum > USHRT_MAX:
         checksum -= USHRT_MAX
@@ -84,7 +82,7 @@ def create_checksum(buf):
 def make_header(cmd, command_string, session_id, reply_id):
     """Build a ZK wire packet. Does NOT mutate any caller state."""
     buf = pack('<4H', cmd, 0, session_id, reply_id) + command_string
-    bs = unpack('8B' + '%sB' % len(command_string), buf)
+    bs = unpack('8B' + f'{len(command_string)}B', buf)
     checksum = create_checksum(bs)
     reply_id += 1
     if reply_id >= USHRT_MAX:
@@ -205,12 +203,12 @@ def op_connect(sock):
 def op_refresh(sock, sid, rid):
     payloads, _, sid2, rid2 = raw_send_recv(sock, CMD_REFRESHDATA, b'', sid, rid, timeout=5)
     if not payloads or unpack('<H', payloads[0][:2])[0] != CMD_ACK_OK:
-        raise RuntimeError(f'REFRESH failed')
+        raise RuntimeError('REFRESH failed')
     return sid2, rid2
 
 
 def op_free_data(sock, sid, rid):
-    payloads, _, sid2, rid2 = raw_send_recv(sock, CMD_FREE_DATA, b'', sid, rid, timeout=5)
+    _, _, sid2, rid2 = raw_send_recv(sock, CMD_FREE_DATA, b'', sid, rid, timeout=5)
     return sid2, rid2
 
 
@@ -244,7 +242,7 @@ def op_delete_user(sock, sid, rid, uid):
 # ---------------------------------------------------------------------------
 
 def main():
-    import argparse
+    import argparse  # noqa: PLC0415  # lazy: script entry point, avoids import cost in helpers
     parser = argparse.ArgumentParser(description='Probe WL10 set_user + delete_user protocol')
     parser.add_argument('ip', help='Device IP')
     parser.add_argument('--port', type=int, default=4370)
@@ -265,10 +263,10 @@ def main():
     s.settimeout(args.timeout)
     try:
         s.connect((args.ip, args.port))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001  # intentional: report connect failure and exit
         print(f'CONNECT socket error: {e}')
         return 1
-    print(f'  TCP connected')
+    print('  TCP connected')
 
     sid, rid = op_connect(s)
     print(f'  ZK connected: sid={sid} rid={rid}')

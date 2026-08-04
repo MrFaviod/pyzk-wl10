@@ -31,8 +31,8 @@ ignore = [
 # Adding tzinfo would break attendance correctness. Keep naive.
 "pyzk_wl10/zk/*.py" = ["DTZ"]
 "listar_marcaciones.py" = ["DTZ"]
-"wl10_probe_write.py" = ["DTZ"]
-"test_wl10_write.py" = ["DTZ"]
+"wl10_probe_write.py" = ["DTZ", "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLR2004"]
+"test_wl10_write.py" = ["DTZ", "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLR2004"]
 
 # Blind excepts in network wrappers are intentional (wrap into ZKNetworkError,
 # or ensure cleanup on device quirks). Keep broad to match pyzk upstream.
