@@ -1281,6 +1281,52 @@ class ZK(object):
                 return False
         return False
 
+    def wl10_reboot(self):
+        """Reboot the WL10/AK3750 device.
+
+        Uses the raw TCP send/recv path (not ``__send_command``) because
+        the WL10 firmware does not respond to the standard buffered
+        sequence — same reason the write/delete operations use the raw
+        path.
+
+        The connection is marked closed on success (the device restarts,
+        so the socket is no longer usable until ``connect()`` again).
+
+        Returns ``True`` if the device ACKed the restart.
+        Raises :class:`ZKErrorResponse` on failure.
+        """
+        if not self.wl10:
+            raise ZKErrorResponse('Not in WL10 mode. Call with wl10=True')
+
+        if not self.tcp:
+            raise ZKErrorResponse('WL10 reboot requires TCP mode')
+
+        # Settle device state before reboot (firmware requirement)
+        self._wl10_refresh_data()
+
+        buf = self.__create_header(const.CMD_RESTART, b'',
+                                   self.__session_id, self.__reply_id)
+        top = self.__create_tcp_top(buf)
+
+        for attempt in range(2):
+            try:
+                self.__sock.send(top)
+            except Exception as e:
+                if self.verbose:
+                    print(f'  [wl10_reboot] send error: {e}')
+                raise ZKErrorResponse(f'Failed to send reboot: {e}')
+
+            cmd, ack_rid = self._wl10_read_ack()
+            if cmd:
+                self.__reply_id = ack_rid
+                if cmd == const.CMD_ACK_OK:
+                    self.is_connect = False
+                    self.next_uid = 1
+                    return True
+                raise ZKErrorResponse(
+                    f'Device rejected reboot: {cmd} (ACK_ERROR)')
+        raise ZKErrorResponse('No response from device')
+
     # ================== End WL10 Specific Methods ==================
 
     def set_user(self, uid=None, name='', privilege=0, password='', group_id='', user_id='', card=0):
