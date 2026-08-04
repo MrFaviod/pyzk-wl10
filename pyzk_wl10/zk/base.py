@@ -1,15 +1,14 @@
-# -*- coding: utf-8 -*-
+import codecs
 import sys
 from datetime import datetime
 from socket import AF_INET, IPPROTO_TCP, SOCK_DGRAM, SOCK_STREAM, TCP_MAXSEG, socket, timeout
 from struct import pack, unpack
-import codecs
 
 from . import const
 from .attendance import Attendance
 from .exception import ZKErrorConnection, ZKErrorResponse, ZKNetworkError
-from .user import User
 from .finger import Finger
+from .user import User
 
 
 def safe_cast(val, to_type, default=None):
@@ -24,7 +23,7 @@ def make_commkey(key, session_id, ticks=50):
     session_id = int(session_id)
     k = 0
     for i in range(32):
-        if (key & (1 << i)):
+        if (key & (1 << i)):  # noqa: SIM108  # bit-twiddling reads clearer as if/else
             k = (k << 1 | 1)
         else:
             k = k << 1
@@ -50,18 +49,19 @@ def make_commkey(key, session_id, ticks=50):
     return k
 
 
-class ZK_helper(object):
+class ZK_helper:
     def __init__(self, ip, port=4370):
         self.address = (ip, port)
         self.ip = ip
         self.port = port
 
     def test_ping(self):
-        import subprocess, platform
+        import platform  # noqa: PLC0415  # lazy import: only needed for ping
+        import subprocess  # noqa: PLC0415  # lazy import: only needed for ping
         ping_str = "-n 1" if platform.system().lower() == "windows" else "-c 1 -W 5"
         args = "ping " + " " + ping_str + " " + self.ip
-        need_sh = False if platform.system().lower() == "windows" else True
-        return subprocess.call(args,
+        need_sh = platform.system().lower() != "windows"
+        return subprocess.call(args,  # noqa: S603  # ip comes from the caller's own config, not untrusted input
                                stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE,
                                shell=need_sh) == 0
@@ -78,7 +78,7 @@ class ZK_helper(object):
         self.client.settimeout(10)
 
 
-class ZK(object):
+class ZK:
     """Main ZK device client.
 
     Supports both the standard pyzk protocol (ZEM500/ZEM600/iClock/...)
@@ -149,7 +149,7 @@ class ZK(object):
 
     def __create_header(self, command, command_string, session_id, reply_id):
         buf = pack('<4H', command, 0, session_id, reply_id) + command_string
-        buf = unpack('8B' + '%sB' % len(command_string), buf)
+        buf = unpack(f'8B{len(command_string)}B', buf)
         checksum = unpack('H', self.__create_checksum(buf))[0]
         reply_id += 1
         if reply_id >= const.USHRT_MAX:
@@ -158,15 +158,15 @@ class ZK(object):
         return buf + command_string
 
     def __create_checksum(self, p):
-        l = len(p)
+        length = len(p)
         checksum = 0
-        while l > 1:
+        while length > 1:
             checksum += unpack('H', pack('BB', p[0], p[1]))[0]
             p = p[2:]
             if checksum > const.USHRT_MAX:
                 checksum -= const.USHRT_MAX
-            l -= 2
-        if l:
+            length -= 2
+        if length:
             checksum = checksum + p[-1]
         while checksum > const.USHRT_MAX:
             checksum -= const.USHRT_MAX
@@ -300,7 +300,7 @@ class ZK(object):
     def connect(self):
         self.end_live_capture = False
         if not self.ommit_ping and not self.helper.test_ping():
-            raise ZKNetworkError("can't reach device (ping %s)" % self.__address[0])
+            raise ZKNetworkError(f"can't reach device (ping {self.__address[0]})")
         if not self.force_udp and self.helper.test_tcp() == 0:
             self.user_packet_size = 72
         self.__create_socket()
@@ -439,10 +439,12 @@ class ZK(object):
             raise ZKErrorResponse("can't read fingerprint version")
 
     def _clear_error(self, command_string=b''):
-        cmd_response = self.__send_command(const.CMD_ACK_ERROR, command_string, 1024)
-        cmd_response = self.__send_command(const.CMD_ACK_UNKNOWN, command_string, 1024)
-        cmd_response = self.__send_command(const.CMD_ACK_UNKNOWN, command_string, 1024)
-        cmd_response = self.__send_command(const.CMD_ACK_UNKNOWN, command_string, 1024)
+        # __send_command has side effects (mutates __response/__reply_id); the
+        # return dict is intentionally discarded here
+        self.__send_command(const.CMD_ACK_ERROR, command_string, 1024)
+        self.__send_command(const.CMD_ACK_UNKNOWN, command_string, 1024)
+        self.__send_command(const.CMD_ACK_UNKNOWN, command_string, 1024)
+        self.__send_command(const.CMD_ACK_UNKNOWN, command_string, 1024)
 
     def get_extend_fmt(self):
         command = const.CMD_OPTIONS_RRQ
@@ -527,17 +529,15 @@ class ZK(object):
             raise ZKErrorResponse("can't free data")
 
     def read_sizes(self):
-        if self.wl10:
-            if self._wl10_read_sizes():
-                return
-            # Fall through to standard method if WL10 mode failed
+        if self.wl10 and self._wl10_read_sizes():
+            return
+        # Fall through to standard method if WL10 mode failed
         command = const.CMD_GET_FREE_SIZES
         response_size = 1024
         cmd_response = self.__send_command(command, b'', response_size)
         if cmd_response.get('status'):
             if self.verbose:
                 print(codecs.encode(self.__data, 'hex'))
-            size = len(self.__data)
             if len(self.__data) >= 80:
                 fields = unpack('20i', self.__data[:80])
                 self.users = fields[4]
@@ -595,12 +595,13 @@ class ZK(object):
             raise ZKErrorResponse("Can't open door")
 
     def __str__(self):
-        return "ZK %s://%s:%s users[%i]:%i/%i fingers:%i/%i, records:%i/%i faces:%i/%i" % (
-            "tcp" if self.tcp else "udp", self.__address[0], self.__address[1],
-            self.user_packet_size, self.users, self.users_cap,
-            self.fingers, self.fingers_cap,
-            self.records, self.rec_cap,
-            self.faces, self.faces_cap
+        proto = "tcp" if self.tcp else "udp"
+        return (
+            f"ZK {proto}://{self.__address[0]}:{self.__address[1]} "
+            f"users[{self.user_packet_size}]:{self.users}/{self.users_cap} "
+            f"fingers:{self.fingers}/{self.fingers_cap}, "
+            f"records:{self.records}/{self.rec_cap} "
+            f"faces:{self.faces}/{self.faces_cap}"
         )
 
     def restart(self):
@@ -655,10 +656,7 @@ class ZK(object):
         command = const.CMD_TESTVOICE
         command_string = pack("I", index)
         cmd_response = self.__send_command(command, command_string)
-        if cmd_response.get('status'):
-            return True
-        else:
-            return False
+        return bool(cmd_response.get('status'))
 
     # ================== WL10 / AK3750 Specific Methods ==================
     #
@@ -769,7 +767,7 @@ class ZK(object):
                 if payload and len(payload) >= 8:
                     return payload
                 if self.verbose:
-                    print(f'  [raw] payload too small, retrying')
+                    print('  [raw] payload too small, retrying')
 
         return b''
 
@@ -880,7 +878,7 @@ class ZK(object):
         # next bulk command. Try them in sequence with retries.
         raw = b''
         for _ in range(3):
-            try:
+            try:  # noqa: SIM105  # keep exception visible for the loop's retry semantics
                 self.free_data()
             except Exception:
                 pass
@@ -997,7 +995,7 @@ class ZK(object):
         empty (the device emitted a "linking" record instead of a
         full user record).
         """
-        for off in range(0, len(rec) - 3):
+        for off in range(len(rec) - 3):
             length = 0
             for end in range(off, min(off + 6, len(rec))):
                 if 0x30 <= rec[end] <= 0x39:
@@ -1210,7 +1208,7 @@ class ZK(object):
                                    self.__session_id, self.__reply_id)
         top = self.__create_tcp_top(buf)
 
-        for attempt in range(2):
+        for _ in range(2):
             try:
                 self.__sock.send(top)
             except Exception as e:
@@ -1265,7 +1263,7 @@ class ZK(object):
                                    self.__session_id, self.__reply_id)
         top = self.__create_tcp_top(buf)
 
-        for attempt in range(2):
+        for _ in range(2):
             try:
                 self.__sock.send(top)
             except Exception as e:
@@ -1311,7 +1309,7 @@ class ZK(object):
                                    self.__session_id, self.__reply_id)
         top = self.__create_tcp_top(buf)
 
-        for attempt in range(2):
+        for _ in range(2):
             try:
                 self.__sock.send(top)
             except Exception as e:
@@ -1350,9 +1348,9 @@ class ZK(object):
                 command_string = pack('HB5s8sIxBHI', uid, privilege, password.encode(self.encoding, errors='ignore'), name.encode(self.encoding, errors='ignore'), card, int(group_id), 0, int(user_id))
             except Exception as e:
                 if self.verbose:
-                    print("s_h Error pack: %s" % e)
+                    print(f"s_h Error pack: {e}")
                 if self.verbose:
-                    print("Error pack: %s" % sys.exc_info()[0])
+                    print(f"Error pack: {sys.exc_info()[0]}")
                 raise ZKErrorResponse("Can't pack user")
         else:
             name_pad = name.encode(self.encoding, errors='ignore').ljust(24, b'\x00')[:24]
@@ -1361,7 +1359,7 @@ class ZK(object):
         response_size = 1024
         cmd_response = self.__send_command(command, command_string, response_size)
         if self.verbose:
-            print("Response: %s" % cmd_response)
+            print(f"Response: {cmd_response}")
         if not cmd_response.get('status'):
             raise ZKErrorResponse("Can't set user")
         self.refresh_data()
@@ -1370,7 +1368,9 @@ class ZK(object):
         if self.next_user_id == user_id:
             self.next_user_id = str(self.next_uid)
 
-    def save_user_template(self, user, fingers=[]):
+    def save_user_template(self, user, fingers=None):
+        if fingers is None:
+            fingers = []
         if not isinstance(user, User):
             users = self.get_users()
             tusers = list(filter(lambda x: x.uid == user, users))
@@ -1393,10 +1393,7 @@ class ZK(object):
             table += pack("<bHbI", 2, user.uid, fnum + finger.fid, tstart)
             tstart += len(tfp)
             fpack += tfp
-        if self.user_packet_size == 28:
-            upack = user.repack29()
-        else:
-            upack = user.repack73()
+        upack = user.repack29() if self.user_packet_size == 28 else user.repack73()
         head = pack("III", len(upack), len(table), len(fpack))
         packet = head + upack + table + fpack
         self._send_with_buffer(packet)
@@ -1437,11 +1434,8 @@ class ZK(object):
         if self.tcp and user_id:
             command = 134
             command_string = pack('<24sB', str(user_id), temp_id)
-            cmd_response = self.__send_command(command, command_string)
-            if cmd_response.get('status'):
-                return True
-            else:
-                return False
+        cmd_response = self.__send_command(command, command_string)
+        return bool(cmd_response.get('status'))
         if not uid:
             users = self.get_users()
             users = list(filter(lambda x: x.user_id == str(user_id), users))
@@ -1451,10 +1445,7 @@ class ZK(object):
         command = const.CMD_DELETE_USERTEMP
         command_string = pack('hb', uid, temp_id)
         cmd_response = self.__send_command(command, command_string)
-        if cmd_response.get('status'):
-            return True
-        else:
-            return False
+        return bool(cmd_response.get('status'))
 
     def delete_user(self, uid=0, user_id=''):
         if not uid:
@@ -1483,7 +1474,7 @@ class ZK(object):
             command = 88
             command_string = pack('hb', uid, temp_id)
             response_size = 1024 + 8
-            cmd_response = self.__send_command(command, command_string, response_size)
+            self.__send_command(command, command_string, response_size)
             data = self.__recieve_chunk()
             if data is not None:
                 resp = data[:-1]
@@ -1492,7 +1483,7 @@ class ZK(object):
                 return Finger(uid, temp_id, 1, resp)
             if self.verbose:
                 print("retry get_user_template")
-        else:
+        else:  # noqa: PLW0120  # else = retries exhausted (loop exits via return)
             if self.verbose:
                 print("Can't read/find finger")
             return None
@@ -1513,7 +1504,7 @@ class ZK(object):
         templatedata = templatedata[4:]
         while total_size:
             size, uid, fid, valid = unpack('HHbb', templatedata[:6])
-            template = unpack("%is" % (size - 6), templatedata[6:size])[0]
+            template = unpack(f"{size - 6}s", templatedata[6:size])[0]
             finger = Finger(uid, fid, valid, template)
             if self.verbose:
                 print(finger)
@@ -1541,21 +1532,19 @@ class ZK(object):
             return []
         total_size = unpack("I", userdata[:4])[0]
         self.user_packet_size = total_size / self.users
-        if not self.user_packet_size in [28, 72]:
-            if self.verbose:
-                print("WRN packet size would be  %i" % self.user_packet_size)
+        if self.user_packet_size not in [28, 72] and self.verbose:
+            print(f"WRN packet size would be  {self.user_packet_size}")
         userdata = userdata[4:]
         if self.user_packet_size == 28:
             while len(userdata) >= 28:
                 uid, privilege, password, name, card, group_id, timezone, user_id = unpack('<HB5s8sIxBhI', userdata.ljust(28, b'\x00')[:28])
-                if uid > max_uid:
-                    max_uid = uid
+                max_uid = max(max_uid, uid)
                 password = (password.split(b'\x00')[0]).decode(self.encoding, errors='ignore')
                 name = (name.split(b'\x00')[0]).decode(self.encoding, errors='ignore').strip()
                 group_id = str(group_id)
                 user_id = str(user_id)
                 if not name:
-                    name = "NN-%s" % user_id
+                    name = f"NN-{user_id}"
                 user = User(uid, name, privilege, password, group_id, user_id, card)
                 users.append(user)
                 if self.verbose:
@@ -1568,10 +1557,9 @@ class ZK(object):
                 name = (name.split(b'\x00')[0]).decode(self.encoding, errors='ignore').strip()
                 group_id = (group_id.split(b'\x00')[0]).decode(self.encoding, errors='ignore').strip()
                 user_id = (user_id.split(b'\x00')[0]).decode(self.encoding, errors='ignore')
-                if uid > max_uid:
-                    max_uid = uid
+                max_uid = max(max_uid, uid)
                 if not name:
-                    name = "NN-%s" % user_id
+                    name = f"NN-{user_id}"
                 user = User(uid, name, privilege, password, group_id, user_id, card)
                 users.append(user)
                 userdata = userdata[72:]
@@ -1604,15 +1592,13 @@ class ZK(object):
         command_string = pack("I", flags)
         cmd_response = self.__send_command(command, command_string)
         if not cmd_response.get('status'):
-            raise ZKErrorResponse("cant' reg events %i" % flags)
+            raise ZKErrorResponse(f"cant' reg events {flags}")
 
     def set_sdk_build_1(self):
         command = const.CMD_OPTIONS_WRQ
         command_string = b"SDKBuild=1"
         cmd_response = self.__send_command(command, command_string)
-        if not cmd_response.get('status'):
-            return False
-        return True
+        return bool(cmd_response.get('status'))
 
     def enroll_user(self, uid=0, temp_id=0, user_id=''):
         command = const.CMD_STARTENROLL
@@ -1631,12 +1617,12 @@ class ZK(object):
         self.cancel_capture()
         cmd_response = self.__send_command(command, command_string)
         if not cmd_response.get('status'):
-            raise ZKErrorResponse("Cant Enroll user #%i [%i]" % (uid, temp_id))
+            raise ZKErrorResponse(f"Cant Enroll user #{uid} [{temp_id}]")
         self.__sock.settimeout(60)
         attempts = 3
         while attempts:
             if self.verbose:
-                print("A:%i esperando primer regevent" % attempts)
+                print(f"A:{attempts} esperando primer regevent")
             data_recv = self.__sock.recv(1032)
             self.__ack_ok()
             if self.verbose:
@@ -1645,22 +1631,21 @@ class ZK(object):
                 if len(data_recv) > 16:
                     res = unpack("H", data_recv.ljust(24, b"\x00")[16:18])[0]
                     if self.verbose:
-                        print("res %i" % res)
-                    if res == 0 or res == 6 or res == 4:
+                        print(f"res {res}")
+                    if res in (0, 6, 4):
                         if self.verbose:
                             print("posible timeout  o reg Fallido")
                         break
-            else:
-                if len(data_recv) > 8:
-                    res = unpack("H", data_recv.ljust(16, b"\x00")[8:10])[0]
-                    if self.verbose:
-                        print("res %i" % res)
-                    if res == 6 or res == 4:
+            elif len(data_recv) > 8:
+                res = unpack("H", data_recv.ljust(16, b"\x00")[8:10])[0]
+                if self.verbose:
+                    print(f"res {res}")
+                if res in (6, 4):
                         if self.verbose:
                             print("posible timeout")
                         break
             if self.verbose:
-                print("A:%i esperando 2do regevent" % attempts)
+                print(f"A:{attempts} esperando 2do regevent")
             data_recv = self.__sock.recv(1032)
             self.__ack_ok()
             if self.verbose:
@@ -1669,8 +1654,8 @@ class ZK(object):
                 if len(data_recv) > 8:
                     res = unpack("H", data_recv.ljust(24, b"\x00")[16:18])[0]
                     if self.verbose:
-                        print("res %i" % res)
-                    if res == 6 or res == 4:
+                        print(f"res {res}")
+                    if res in (6, 4):
                         if self.verbose:
                             print("posible timeout  o reg Fallido")
                         break
@@ -1678,19 +1663,18 @@ class ZK(object):
                         if self.verbose:
                             print("ok, continue?")
                         attempts -= 1
-            else:
-                if len(data_recv) > 8:
-                    res = unpack("H", data_recv.ljust(16, b"\x00")[8:10])[0]
+            elif len(data_recv) > 8:
+                res = unpack("H", data_recv.ljust(16, b"\x00")[8:10])[0]
+                if self.verbose:
+                    print(f"res {res}")
+                if res in (6, 4):
                     if self.verbose:
-                        print("res %i" % res)
-                    if res == 6 or res == 4:
-                        if self.verbose:
-                            print("posible timeout  o reg Fallido")
-                        break
-                    elif res == 0x64:
-                        if self.verbose:
-                            print("ok, continue?")
-                        attempts -= 1
+                        print("posible timeout  o reg Fallido")
+                    break
+                elif res == 0x64:
+                    if self.verbose:
+                        print("ok, continue?")
+                    attempts -= 1
         if attempts == 0:
             data_recv = self.__sock.recv(1032)
             self.__ack_ok()
@@ -1701,11 +1685,11 @@ class ZK(object):
             else:
                 res = unpack("H", data_recv.ljust(16, b"\x00")[8:10])[0]
             if self.verbose:
-                print("res %i" % res)
-            if res == 5:
+                print(f"res {res}")
+            if res == 5:  # noqa: SIM102  # nested for readability
                 if self.verbose:
                     print("finger duplicate")
-            if res == 6 or res == 4:
+            if res in (6, 4):  # noqa: SIM102  # nested for readability
                 if self.verbose:
                     print("posible timeout")
             if res == 0:
@@ -1739,16 +1723,14 @@ class ZK(object):
                 data_recv = self.__sock.recv(1032)
                 self.__ack_ok()
                 if self.tcp:
-                    size = unpack('<HHI', data_recv[:8])[2]
                     header = unpack('HHHH', data_recv[8:16])
                     data = data_recv[16:]
                 else:
-                    size = len(data_recv)
                     header = unpack('<4H', data_recv[:8])
                     data = data_recv[8:]
-                if not header[0] == const.CMD_REG_EVENT:
+                if header[0] != const.CMD_REG_EVENT:
                     if self.verbose:
-                        print("not event! %x" % header[0])
+                        print(f"not event! {header[0]:x}")
                     continue
                 if not len(data):
                     if self.verbose:
@@ -1773,10 +1755,7 @@ class ZK(object):
                         user_id = (user_id.split(b'\x00')[0]).decode(errors='ignore')
                     timestamp = self.__decode_timehex(timehex)
                     tuser = list(filter(lambda x: x.user_id == user_id, users))
-                    if not tuser:
-                        uid = int(user_id)
-                    else:
-                        uid = tuser[0].uid
+                    uid = int(user_id) if not tuser else tuser[0].uid
                     yield Attendance(user_id, timestamp, status, punch, uid)
             except timeout:
                 if self.verbose:
@@ -1903,14 +1882,10 @@ class ZK(object):
                     data_recv = self.__data[8:]
                 else:
                     data_recv = self.__data[8:] + self.__sock.recv(size + 32)
-                resp, broken_header = self.__recieve_tcp_data(data_recv, size)
+                resp, _broken_header = self.__recieve_tcp_data(data_recv, size)
                 data.append(resp)
-                if len(broken_header) < 16:
-                    data_recv = broken_header + self.__sock.recv(16)
-                else:
-                    data_recv = broken_header
                 if len(data_recv) < 16:
-                    print("trying to complete broken ACK %s /16" % len(data_recv))
+                    print(f"trying to complete broken ACK {len(data_recv)} /16")
                     if self.verbose:
                         print(data_recv.encode('hex'))
                     data_recv += self.__sock.recv(16 - len(data_recv))
@@ -1924,7 +1899,7 @@ class ZK(object):
                         print("chunk tcp ACK OK!")
                     return b''.join(data)
                 if self.verbose:
-                    print("bad response %s" % data_recv)
+                    print(f"bad response {data_recv}")
                     print(codecs.encode(data, 'hex'))
                 return None
 
@@ -1944,33 +1919,27 @@ class ZK(object):
                         print("broken!")
                     break
                 if self.verbose:
-                    print("still needs %s" % size)
+                    print(f"still needs {size}")
             return b''.join(data)
         else:
             if self.verbose:
-                print("invalid response %s" % self.__response)
+                print(f"invalid response {self.__response}")
             return None
 
     def __read_chunk(self, start, size):
         for _retries in range(3):
             command = 1504
             command_string = pack('<ii', start, size)
-            if self.tcp:
-                response_size = size + 32
-            else:
-                response_size = 1024 + 8
-            cmd_response = self.__send_command(command, command_string, response_size)
+            response_size = size + 32 if self.tcp else 1024 + 8
+            self.__send_command(command, command_string, response_size)
             data = self.__recieve_chunk()
             if data is not None:
                 return data
-        else:
-            raise ZKErrorResponse("can't read chunk %i:[%i]" % (start, size))
+        else:  # noqa: PLW0120  # else = retries exhausted (loop exits via return)
+            raise ZKErrorResponse(f"can't read chunk {start}:[{size}]")
 
     def read_with_buffer(self, command, fct=0, ext=0):
-        if self.tcp:
-            MAX_CHUNK = 0xFFc0
-        else:
-            MAX_CHUNK = 16 * 1024
+        MAX_CHUNK = 0xFFC0 if self.tcp else 16 * 1024
         command_string = pack('<bhii', 1, command, fct, ext)
         if self.verbose:
             print("rwb cs", command_string)
@@ -2000,7 +1969,7 @@ class ZK(object):
                 return self.__data, size
         size = unpack('I', self.__data[1:5])[0]
         if self.verbose:
-            print("size fill be %i" % size)
+            print(f"size fill be {size}")
         remain = size % MAX_CHUNK
         packets = (size - remain) // MAX_CHUNK
         if self.verbose:
@@ -2013,13 +1982,13 @@ class ZK(object):
             start += remain
         self.free_data()
         if self.verbose:
-            print("_read w/chunk %i bytes" % start)
+            print(f"_read w/chunk {start} bytes")
         return b''.join(data), start
 
     def get_attendance(self):
         # Save original mode for restoration
         saved_wl10 = self.wl10
-        
+
         if self.wl10:
             # Try WL10 method first
             attendances = self._wl10_get_attendance()
@@ -2030,7 +1999,7 @@ class ZK(object):
             if self.verbose:
                 print("WL10 attendance returned empty, trying standard method...")
             self.wl10 = False
-        
+
         try:
             self.read_sizes()
         except Exception as e:
@@ -2038,7 +2007,7 @@ class ZK(object):
                 print(f"read_sizes failed: {e}")
             self.wl10 = saved_wl10
             return []
-        
+
         if self.records == 0:
             self.wl10 = saved_wl10
             return []
@@ -2063,16 +2032,13 @@ class ZK(object):
                     print(codecs.encode(attendance_data[:8], 'hex'))
                 attendance_data = attendance_data[8:]
                 tuser = list(filter(lambda x: x.uid == uid, users))
-                if not tuser:
-                    user_id = str(uid)
-                else:
-                    user_id = tuser[0].user_id
+                user_id = str(uid) if not tuser else tuser[0].user_id
                 timestamp = self.__decode_time(timestamp)
                 attendance = Attendance(user_id, timestamp, status, punch, uid)
                 attendances.append(attendance)
         elif record_size == 16:
             while len(attendance_data) >= 16:
-                user_id, timestamp, status, punch, reserved, workcode = unpack('<I4sBB2sI', attendance_data.ljust(16, b'\x00')[:16])
+                user_id, timestamp, status, punch, _reserved, _workcode = unpack('<I4sBB2sI', attendance_data.ljust(16, b'\x00')[:16])
                 user_id = str(user_id)
                 if self.verbose:
                     print(codecs.encode(attendance_data[:16], 'hex'))
@@ -2095,7 +2061,7 @@ class ZK(object):
                 attendances.append(attendance)
         else:
             while len(attendance_data) >= 40:
-                uid, user_id, status, timestamp, punch, space = unpack('<H24sB4sB8s', attendance_data.ljust(40, b'\x00')[:40])
+                uid, user_id, status, timestamp, punch, _space = unpack('<H24sB4sB8s', attendance_data.ljust(40, b'\x00')[:40])
                 if self.verbose:
                     print(codecs.encode(attendance_data[:40], 'hex'))
                 user_id = (user_id.split(b'\x00')[0]).decode(errors='ignore')
