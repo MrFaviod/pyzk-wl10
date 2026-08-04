@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """List attendance records from ZK fingerprint device (WL10 compatible)."""
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pyzk_wl10'))
-from zk import ZK
+
 import argparse
-from datetime import datetime, date
+from datetime import date, datetime
+
+from zk import ZK
 
 # Traducción al español del label canónico del estado (ver Attendance.status_label)
 STATUS_ES = {
@@ -42,17 +45,17 @@ def main():
     zk = ZK(args.ip, port=args.port, timeout=args.timeout,
             password=args.password, ommit_ping=True, force_udp=False,
             wl10=not args.no_wl10)
-    conn = zk.connect()
+    zk.connect()
 
     dev_name = zk.get_device_name() or ''
     use_wl10 = args.no_wl10 is False and ('WL10' in dev_name or zk.wl10)
 
     if use_wl10:
-        users = zk.wl10_get_users()
+        zk.wl10_get_users()
         attendance = zk.wl10_get_attendance()
     else:
         zk.read_sizes()
-        users = zk.get_users()
+        zk.get_users()
         attendance = zk.get_attendance()
 
     if args.csv:
