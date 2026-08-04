@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
-from struct import pack
 import codecs
+from struct import pack
 
 
-class Finger(object):
+class Finger:  # noqa: PLW1641 — template is a mutable bytearray by design, objects are intentionally unhashable
 
     def __init__(self, uid, fid, valid, template):
         self.size = len(template)
@@ -14,10 +13,10 @@ class Finger(object):
         self.mark = codecs.encode(template[:8], 'hex') + b'...' + codecs.encode(template[-8:], 'hex')
 
     def repack(self):
-        return pack("HHbb%is" % (self.size), self.size+6, self.uid, self.fid, self.valid, self.template)
+        return pack(f"HHbb{self.size}s", self.size + 6, self.uid, self.fid, self.valid, self.template)
 
     def repack_only(self):
-        return pack("H%is" % (self.size), self.size, self.template)
+        return pack(f"H{self.size}s", self.size, self.template)
 
     @staticmethod
     def json_unpack(json):

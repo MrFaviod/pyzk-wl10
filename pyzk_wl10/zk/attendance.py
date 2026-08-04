@@ -1,11 +1,9 @@
-# -*- coding: utf-8 -*-
-from datetime import datetime
 
 from zk import const
 
 
-class Attendance(object):
-    def __init__(self, user_id, timestamp, status, punch=0, uid=0, name='', badge=''):
+class Attendance:
+    def __init__(self, user_id, timestamp, status, punch=0, uid=0, name='', badge=''):  # noqa: PLR0913, PLR0917 — public dataclass API, signature is the interface
         self.uid = uid
         self.user_id = user_id
         self.timestamp = timestamp
