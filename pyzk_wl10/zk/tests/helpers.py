@@ -8,15 +8,14 @@ import directly.
 import os
 import struct
 
-
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 WL10_ROOT = os.path.join(ROOT, 'pyzk_wl10')
 import sys
+
 for p in (WL10_ROOT, ROOT):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from zk import const
 
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')

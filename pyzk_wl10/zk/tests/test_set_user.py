@@ -4,13 +4,15 @@ These tests verify guard clauses, privilege clamping, payload
 construction, ACK response handling and reply_id synchronization.
 Full end-to-end tests require a live device (see wl10_probe_write.py).
 """
-from struct import pack, unpack
+from contextlib import suppress
+from struct import unpack
 from unittest.mock import MagicMock
+
 import pytest
 
-from zk.base import ZK
 from zk import const
-from zk.const import WL10_USER_RECORD_SIZE, USER_DEFAULT, USER_ADMIN
+from zk.base import ZK
+from zk.const import USER_ADMIN, USER_DEFAULT, WL10_USER_RECORD_SIZE
 from zk.exception import ZKErrorResponse
 
 
@@ -163,10 +165,8 @@ class TestWl10SetUserResponse:
         command uses the correct sequence number."""
         inst = _build_wl10_zk(ack_cmd=const.CMD_ACK_ERROR, ack_rid=7777)
         assert inst._ZK__reply_id == 6789
-        try:
+        with suppress(ZKErrorResponse):
             inst.wl10_set_user(uid=1, user_id='999950')
-        except ZKErrorResponse:
-            pass
         assert inst._ZK__reply_id == 7777, \
             f'Expected 7777, got {inst._ZK__reply_id}'
 
@@ -176,8 +176,6 @@ class TestWl10SetUserResponse:
         inst = _build_wl10_zk(ack_cmd=const.CMD_ACK_OK, ack_rid=6790)
         # First write — sets __reply_id to 6790
         inst.wl10_set_user(uid=1, name='A', user_id='999950')
-        first_sent = inst._ZK__sock.send.call_args_list[0][0][0]
-        first_rid_in_wire = unpack('<4H', first_sent[8:16])[3]
         # Second write — should embed rid = 6790 + 1 = 6791
         inst._wl10_read_ack.return_value = (const.CMD_ACK_OK, 6791)
         inst.wl10_set_user(uid=2, name='B', user_id='999951')

@@ -43,3 +43,10 @@ ignore = [
 # methods (connect, set_user, get_attendance) — restructuring without live
 # device verification is out of scope for this lint sweep.
 "pyzk_wl10/zk/base.py" = ["BLE001", "PLR2004", "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLR0911"]
+
+# S101: assert is the idiomatic pytest assertion style.
+# PLR2004: fixture values (fixed sid/rid/uid) are the point of tests.
+# S105/S106: fixture passwords for protocol round-trip tests.
+# E402: tests import zk via sys.path manipulation in conftest (not installed).
+# PLR0913/PLR0917: test fixture signatures with many params.
+"pyzk_wl10/zk/tests/*.py" = ["S101", "DTZ", "PLR2004", "S105", "S106", "E402", "PLR0913", "PLR0917"]

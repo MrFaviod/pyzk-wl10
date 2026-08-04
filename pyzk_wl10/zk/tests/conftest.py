@@ -4,6 +4,7 @@ Shared helper functions live in ``helpers.py`` — import that module directly.
 """
 import os
 import sys
+
 import pytest
 
 TESTS_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -15,8 +16,8 @@ for p in (TESTS_DIR, WL10_ROOT, ROOT):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from zk.base import ZK
 from zk import const
+from zk.base import ZK
 
 
 @pytest.fixture
