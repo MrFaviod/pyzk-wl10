@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 USHRT_MAX = 65535
 
