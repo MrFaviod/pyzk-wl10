@@ -36,4 +36,10 @@ ignore = [
 
 # Blind excepts in network wrappers are intentional (wrap into ZKNetworkError,
 # or ensure cleanup on device quirks). Keep broad to match pyzk upstream.
-"pyzk_wl10/zk/base.py" = ["BLE001"]
+# PLR2004 (magic values) is the ZK wire protocol itself — command codes,
+# record sizes, and packing offsets ARE the constants, extracted into const.py
+# where feasible; the remaining inline protocol magic is intentional.
+# PLR0912/0913/0915/0917/0911 (too many args/branches/stmts) are legacy pyzk
+# methods (connect, set_user, get_attendance) — restructuring without live
+# device verification is out of scope for this lint sweep.
+"pyzk_wl10/zk/base.py" = ["BLE001", "PLR2004", "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLR0911"]
