@@ -1,8 +1,7 @@
 from datetime import datetime
-from helpers import (
-    FIXTURES_DIR, pack_attendance_record, pack_bulk_response,
-    encode_zk_time
-)
+
+from helpers import encode_zk_time, pack_attendance_record, pack_bulk_response
+
 from zk.const import WL10_ATT_RECORD_SIZE
 
 

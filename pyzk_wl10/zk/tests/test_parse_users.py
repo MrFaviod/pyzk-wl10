@@ -1,7 +1,8 @@
 import os
-from helpers import FIXTURES_DIR, pack_user_record, pack_bulk_response
-from zk.user import User
-from zk.const import USER_ADMIN, USER_DEFAULT, WL10_USER_RECORD_SIZE
+
+from helpers import FIXTURES_DIR, pack_bulk_response, pack_user_record
+
+from zk.const import USER_ADMIN, WL10_USER_RECORD_SIZE
 
 
 class TestParseUsers:

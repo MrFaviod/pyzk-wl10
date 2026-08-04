@@ -5,12 +5,13 @@ Rebooting a WL10 device must use the raw TCP path (not the buffered
 firmware does not respond to the buffered sequence — same reason the
 write/delete/refresh operations use the raw path.
 """
-from struct import pack, unpack
+from struct import unpack
 from unittest.mock import MagicMock
+
 import pytest
 
-from zk.base import ZK
 from zk import const
+from zk.base import ZK
 from zk.exception import ZKErrorResponse
 
 
@@ -65,10 +66,10 @@ class TestWl10RebootPayload:
         inst.wl10_reboot()
         frame = _first_send_frame(inst._ZK__sock)
         # Frame layout: TCP top (8B: magic1, magic2, dsize) + ZK header (16B+)
-        magic1, magic2, dsize = unpack('<HHI', frame[:8])
+        magic1, magic2, _dsize = unpack('<HHI', frame[:8])
         assert magic1 == const.MACHINE_PREPARE_DATA_1
         assert magic2 == const.MACHINE_PREPARE_DATA_2
-        cmd, chk, sid, rid = unpack('<HHHH', frame[8:16])
+        cmd, _chk, sid, _rid = unpack('<HHHH', frame[8:16])
         assert cmd == const.CMD_RESTART, \
             f'Expected CMD_RESTART ({const.CMD_RESTART}), got {cmd}'
         assert sid == 12345

@@ -7,7 +7,6 @@ responses (up to ~3200B) exceed the MTU and never arrive -> timeout.
 Forcing TCP_MAXSEG=1200 makes the device's segments fit the path MTU.
 """
 import socket as _socket
-import pytest
 
 import zk.base as base_module
 from zk.base import ZK

@@ -1,6 +1,8 @@
-import struct
 import os
-from helpers import pack_bulk_response, pack_user_record, FIXTURES_DIR
+import struct
+
+from helpers import FIXTURES_DIR, pack_bulk_response, pack_user_record
+
 
 class TestStripHeader:
     """Test the _wl10_strip_header static method."""

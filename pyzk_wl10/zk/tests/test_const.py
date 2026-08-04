@@ -1,4 +1,6 @@
-import sys, os
+import os
+import sys
+
 # Ensure the library path is set
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 WL10_ROOT = os.path.join(ROOT, 'pyzk_wl10')
