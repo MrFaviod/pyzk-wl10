@@ -142,3 +142,6 @@ cython_debug/
 *.swo
 *~
 .DS_Store
+
+# OpenCode agent workspace
+.omo/
