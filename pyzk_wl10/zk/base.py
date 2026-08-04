@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import sys
 from datetime import datetime
-from socket import AF_INET, SOCK_DGRAM, SOCK_STREAM, socket, timeout
+from socket import AF_INET, IPPROTO_TCP, SOCK_DGRAM, SOCK_STREAM, TCP_MAXSEG, socket, timeout
 from struct import pack, unpack
 import codecs
 
@@ -87,7 +87,7 @@ class ZK(object):
     below for the protocol details.
     """
 
-    def __init__(self, ip, port=4370, timeout=60, password=0, force_udp=False, ommit_ping=False, verbose=False, encoding='UTF-8', wl10=False):
+    def __init__(self, ip, port=4370, timeout=60, password=0, force_udp=False, ommit_ping=False, verbose=False, encoding='UTF-8', wl10=False, tcp_maxseg=None):
         User.encoding = encoding
         self.__address = (ip, port)
         self.__sock = socket(AF_INET, SOCK_DGRAM)
@@ -125,6 +125,7 @@ class ZK(object):
         self.user_packet_size = 28
         self.end_live_capture = False
         self.wl10 = wl10
+        self.tcp_maxseg = tcp_maxseg
         self.platform = ''
 
     def __nonzero__(self):
@@ -134,6 +135,8 @@ class ZK(object):
         if self.tcp:
             self.__sock = socket(AF_INET, SOCK_STREAM)
             self.__sock.settimeout(self.__timeout)
+            if self.tcp_maxseg:
+                self.__sock.setsockopt(IPPROTO_TCP, TCP_MAXSEG, self.tcp_maxseg)
             self.__sock.connect_ex(self.__address)
         else:
             self.__sock = socket(AF_INET, SOCK_DGRAM)
