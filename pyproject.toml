@@ -1,0 +1,39 @@
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+extend-exclude = ["test_wl10_write.py"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes (unused imports/vars, undefined names)
+    "I",    # isort
+    "UP",   # pyupgrade
+    "SIM",  # simplify
+    "BLE",  # blind except
+    "S",    # bandit (security)
+    "B",    # bugbear
+    "PIE",  # misc lints
+    "PL",   # pylint rules
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "E501",  # line too long — project style allows long protocol strings
+    "S110",  # try-except-pass — intentional device fallbacks (read_sizes, free_data loop)
+    "B904",  # raise ... from None — style choice, not required
+    "UP032",  # format() → f-string — big churn in legacy pyzk; handled per-file
+]
+
+[tool.ruff.lint.per-file-ignores]
+# WL10 device timestamps are NAIVE by protocol design:
+# ZK timestamp encoding (Y%100)*12*31*86400 + ... has no timezone concept.
+# Adding tzinfo would break attendance correctness. Keep naive.
+"pyzk_wl10/zk/*.py" = ["DTZ"]
+"listar_marcaciones.py" = ["DTZ"]
+"wl10_probe_write.py" = ["DTZ"]
+"test_wl10_write.py" = ["DTZ"]
+
+# Blind excepts in network wrappers are intentional (wrap into ZKNetworkError,
+# or ensure cleanup on device quirks). Keep broad to match pyzk upstream.
+"pyzk_wl10/zk/base.py" = ["BLE001"]
