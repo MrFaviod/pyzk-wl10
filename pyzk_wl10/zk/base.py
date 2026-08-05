@@ -1088,6 +1088,7 @@ class ZK:
         rec_size = const.WL10_ATT_RECORD_SIZE
         n = min(n_declared, len(records) // rec_size)
         attendances = []
+        seen = set()
         now_year = datetime.now().year
         min_year = 2020
         max_year = now_year + 1
@@ -1106,17 +1107,28 @@ class ZK:
                 # future-dated records from clock drift).
                 continue
 
+            # Some WL10 firmwares (e.g. Bella Vista vpn-device) emit every
+            # attendance record twice. Collapse identical punches while
+            # keeping distinct ones (different status/time is NOT a dup).
+            key = (user_id_raw, ts, status)
+            if key in seen:
+                continue
+            seen.add(key)
+
             name = ''
             badge = user_id_raw or str(uid)
             if users_map:
                 # Try user_id first (it's the actual badge number that
                 # employees use to clock in), then fall back to uid.
+                # A missing entry (partial user table) falls back to the
+                # raw badge instead of crashing.
                 for key in (user_id_raw, str(uid)) if user_id_raw else (str(uid),):
-                    if key in users_map:
-                        info = users_map[key]
-                        name = info.get('name', '') or name
-                        badge = info.get('badge', badge) or badge
-                        break
+                    info = users_map.get(key)
+                    if not info:
+                        continue
+                    name = info.get('name', '') or name
+                    badge = info.get('badge', badge) or badge
+                    break
 
             attendances.append(Attendance(badge, dt, status, 0, uid, name, badge))
 
