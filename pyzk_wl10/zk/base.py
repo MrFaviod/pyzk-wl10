@@ -1,5 +1,6 @@
 import codecs
 import sys
+import time
 from datetime import datetime
 from socket import AF_INET, IPPROTO_TCP, SOCK_DGRAM, SOCK_STREAM, TCP_MAXSEG, socket, timeout
 from struct import pack, unpack
@@ -858,10 +859,64 @@ class ZK:
 
         return raw_data, len(raw_data) // record_size
 
+    @staticmethod
+    def _wl10_bulk_is_complete(raw_data, record_size):
+        """Return True if a bulk response is not truncated.
+
+        The WL10 framing (12-byte header + N*M records) announces the
+        record section size in the header. On unstable links the device
+        can stop sending before the full body arrives; ``_wl10_strip_header``
+        then falls back to interpreting the outer field as a record
+        count and silently drops the missing tail. This gate detects the
+        mismatch so the caller can retry instead of accepting a partial
+        table::
+
+            True  - header's declared section == bytes actually received
+            False - fewer bytes than announced (truncated) or no data
+        """
+        if not raw_data or len(raw_data) < 12:
+            return False
+
+        section = unpack('I', raw_data[8:12])[0]
+        if section == len(raw_data) - 12 and section % record_size == 0:
+            return True
+
+        # Variant: section header at offset 4 (buffered read path).
+        if len(raw_data) >= 8:
+            section4 = unpack('I', raw_data[4:8])[0]
+            if section4 == len(raw_data) - 8 and section4 % record_size == 0:
+                return True
+
+        return False
+
     def _wl10_get_users(self):
-        """Read and parse the user table from the device."""
-        raw = self._wl10_read_bulk_data(const.CMD_USERTEMP_RRQ, const.FCT_USER)
-        return self._wl10_parse_users(raw)
+        """Read and parse the user table from the device.
+
+        Retries truncated reads (free_data + short backoff between
+        attempts) instead of returning a partial table, which used to
+        happen silently on unstable links (Bella Vista vpn-device).
+        """
+        last_raw = b''
+        for attempt in range(3):
+            if attempt > 0:
+                # Settle the device between bulk reads; the AK3750
+                # firmware often needs CMD_FREE_DATA before it will
+                # service the next bulk command.
+                try:  # noqa: SIM105  # keep exception visible for retry semantics
+                    self.free_data()
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            raw = self._wl10_read_bulk_data(const.CMD_USERTEMP_RRQ, const.FCT_USER)
+            if self._wl10_bulk_is_complete(raw, const.WL10_USER_RECORD_SIZE):
+                return self._wl10_parse_users(raw)
+            last_raw = raw
+            if self.verbose:
+                print(f'  [wl10_users] truncated/empty bulk (attempt {attempt + 1}), retrying')
+
+        raise ZKErrorResponse(
+            f'Cannot read a complete user table from the device '
+            f'(got {len(last_raw)} bytes after 3 attempts)')
 
     def _wl10_get_attendance(self):
         """Read and parse the attendance log from the device.
@@ -883,8 +938,14 @@ class ZK:
             except Exception:
                 pass
             raw = self._wl10_read_bulk_data(const.CMD_ATTLOG_RRQ, const.FCT_ATTLOG)
-            if raw and len(raw) >= 8:
+            if (raw and len(raw) >= 8
+                    and self._wl10_bulk_is_complete(raw, const.WL10_ATT_RECORD_SIZE)):
                 break
+
+        if not self._wl10_bulk_is_complete(raw, const.WL10_ATT_RECORD_SIZE):
+            raise ZKErrorResponse(
+                f'Cannot read a complete attendance log from the device '
+                f'(got {len(raw)} bytes after 3 attempts)')
 
         return self._wl10_parse_attendance(raw, users_map)
 
