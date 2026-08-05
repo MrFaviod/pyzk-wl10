@@ -158,3 +158,80 @@ class TestWl10GetAttendanceTruncation:
         inst = self._inst_with_attendance_flow(raw)
         with pytest.raises(ZKErrorResponse, match='complete attendance log'), patch('zk.base.time.sleep'):
             inst._wl10_get_attendance()
+
+
+class TestWl10AttendanceDedup:
+    """110.152 firmware emits every attendance record twice (exact dupes).
+
+    Dedup is by (user_id, timestamp, status) — identical punch events are
+    collapsed, distinct punches (e.g. different status) are kept.
+    """
+
+    def _parse(self, records_bytes):
+        raw = pack_bulk_response(records_bytes, const.WL10_ATT_RECORD_SIZE)
+        inst = _build_wl10_zk()
+        return inst._wl10_parse_attendance(raw, users_map=None)
+
+    def _dup_pair(self):
+        one = _one_attendance_record()
+        return one + one
+
+    def test_duplicate_exact_pair_collapses(self):
+        att = self._parse(self._dup_pair())
+        assert len(att) == 1, 'Two identical records must collapse to one'
+
+    def test_non_consecutive_duplicates_also_collapse(self):
+        one = _one_attendance_record()
+        other = pack_attendance_record(
+            uid=27, user_id=b'27', flag=1,
+            timestamp=encode_zk_time(datetime(2026, 7, 2, 9, 0, 0)), status=1)
+        att = self._parse(one + other + one)
+        assert len(att) == 2, 'Interleaved duplicate must still collapse'
+
+    def test_same_uid_timestamp_different_status_kept(self):
+        one = _one_attendance_record()
+        flip = pack_attendance_record(
+            uid=26, user_id=b'26', flag=1,
+            timestamp=encode_zk_time(datetime(2026, 7, 1, 14, 5, 38)), status=1)
+        att = self._parse(one + flip)
+        assert len(att) == 2, 'Same event with different status is NOT a duplicate'
+
+    def test_all_duplicates_produce_unique_count(self):
+        one = _one_attendance_record()
+        att = self._parse(one * 6)
+        assert len(att) == 1, 'Six copies of the same event must collapse to one'
+
+    def test_empty_bulk_returns_empty_list(self):
+        att = self._parse(b'')
+        assert att == []
+
+
+class TestWl10AttendanceMissingUser:
+    """Bella Vista can deliver a user table missing a badge that
+    attendance records still reference. The parser must fall back to the
+    raw badge instead of crashing with KeyError.
+    """
+
+    def test_missing_badge_in_users_map_does_not_crash(self):
+        raw = pack_bulk_response(_one_attendance_record(),
+                                 const.WL10_ATT_RECORD_SIZE)
+        inst = _build_wl10_zk()
+        # users_map is non-empty but lacks the badge the record references
+        # (Bella Vista delivered a partial user table) — must fall back to
+        # the raw user_id, not raise KeyError.
+        att = inst._wl10_parse_attendance(raw, users_map={'999': {'name': 'X', 'badge': '999', 'uid': 999}})
+        assert len(att) == 1
+        assert att[0].badge == '26', 'Badge falls back to the raw user_id'
+
+    def test_partial_users_map_falls_back_gracefully(self):
+        one = _one_attendance_record()
+        other = pack_attendance_record(
+            uid=27, user_id=b'999', flag=1,
+            timestamp=encode_zk_time(datetime(2026, 7, 2, 9, 0, 0)), status=1)
+        raw = pack_bulk_response(one + other, const.WL10_ATT_RECORD_SIZE)
+        inst = _build_wl10_zk()
+        # users_map knows uid 26 only — the b'999' record must not crash
+        att = inst._wl10_parse_attendance(raw, users_map={'26': {'name': 'Alice', 'badge': '26', 'uid': 26}})
+        assert len(att) == 2
+        by_badge = {a.badge: a for a in att}
+        assert by_badge['999'].status == 1, 'Record with missing user still parsed'
