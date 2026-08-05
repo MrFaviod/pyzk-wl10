@@ -1882,8 +1882,12 @@ class ZK:
                     data_recv = self.__data[8:]
                 else:
                     data_recv = self.__data[8:] + self.__sock.recv(size + 32)
-                resp, _broken_header = self.__recieve_tcp_data(data_recv, size)
+                resp, broken_header = self.__recieve_tcp_data(data_recv, size)
                 data.append(resp)
+                if len(broken_header) < 16:  # noqa: SIM108  # functional: rebuild data_recv from leftover bytes; keep explicit
+                    data_recv = broken_header + self.__sock.recv(16)
+                else:
+                    data_recv = broken_header
                 if len(data_recv) < 16:
                     print(f"trying to complete broken ACK {len(data_recv)} /16")
                     if self.verbose:
