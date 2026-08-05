@@ -99,11 +99,11 @@ users = zk.wl10_get_users()
 attendance = zk.wl10_get_attendance()
 
 # Write (NEW)
-zk.wl10_set_user(uid=200, name='Alice', privilege=0, user_id='999950', card=0)
-zk.wl10_set_user(uid=201, name='Bob', privilege=14, user_id='999951')  # ADMIN
+zk.wl10_set_user(uid=1000, name='Alice', privilege=0, user_id='999950', card=0)
+zk.wl10_set_user(uid=1001, name='Bob', privilege=14, user_id='999951')  # ADMIN
 
 # Delete (returns True but may not persist on this firmware)
-zk.wl10_delete_user(uid=200)
+zk.wl10_delete_user(uid=1000)
 
 zk.disconnect()
 ```

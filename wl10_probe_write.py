@@ -251,9 +251,9 @@ def main():
     args = parser.parse_args()
 
     # UIDs and badges for probe
-    USER_UID = 200
+    USER_UID = 1000
     USER_BADGE = '999950'
-    ADMIN_UID = 201
+    ADMIN_UID = 1001
     ADMIN_BADGE = '999951'
 
     print(f'=== WL10 probe_write against {args.ip}:{args.port} ===')

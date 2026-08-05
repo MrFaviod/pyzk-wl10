@@ -127,11 +127,11 @@ users = zk.wl10_get_users()         # list[User]
 attendance = zk.wl10_get_attendance()  # list[Attendance]
 
 # Write a new user (privilege 0 = USER_DEFAULT, 14 = USER_ADMIN)
-zk.wl10_set_user(uid=200, name='Alice', privilege=0,
+zk.wl10_set_user(uid=1000, name='Alice', privilege=0,
                  user_id='999950', card=0)
 
 # Delete a user (may return True but still leave the user on some FW)
-zk.wl10_delete_user(uid=200)
+zk.wl10_delete_user(uid=1000)
 
 print(f'{len(users)} users, {len(attendance)} attendance records')
 zk.disconnect()
