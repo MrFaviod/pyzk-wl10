@@ -1903,7 +1903,7 @@ class ZK:
             if size < 0:
                 broken_header = data_recv[size:]
                 if self.verbose:
-                    print("broken", (broken_header).encode('hex'))
+                    print("broken", codecs.encode(broken_header, 'hex'))
             if size > 0:
                 data_recv = self.__recieve_raw_data(size)
                 data.append(data_recv)
@@ -1962,9 +1962,9 @@ class ZK:
                 else:
                     data_recv = broken_header
                 if len(data_recv) < 16:
-                    print(f"trying to complete broken ACK {len(data_recv)} /16")
                     if self.verbose:
-                        print(data_recv.encode('hex'))
+                        print(f"trying to complete broken ACK {len(data_recv)} /16")
+                        print(codecs.encode(data_recv, 'hex'))
                     data_recv += self.__sock.recv(16 - len(data_recv))
                 if not self.__test_tcp_top(data_recv):
                     if self.verbose:
