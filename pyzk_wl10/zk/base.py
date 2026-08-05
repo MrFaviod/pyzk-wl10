@@ -725,10 +725,22 @@ class ZK:
         """Send a command and read the entire response via raw recv.
 
         Last-resort fallback for AK3750 firmwares whose TCP framing is
-        not understood by :meth:`__send_command`. It deliberately does
-        NOT update ``__session_id`` / ``__reply_id`` from the captured
-        packets -- doing so used to corrupt the session state and break
-        subsequent commands.
+        not understood by :meth:`__send_command`.
+
+        ``__reply_id`` IS updated from the final ``CMD_ACK_OK`` /
+        ``CMD_ACK_ERROR`` packet echoed by the device — the device
+        advances its internal reply_id by one per command and echoes it
+        back in the ACK, so the client must track it to stay in sync.
+        Without this, a write issued after a bulk read (which used to
+        leave ``__reply_id`` stale) would be rejected with
+        ``ACK_ERROR``.
+
+        ``__session_id`` is deliberately NOT updated: bulk-read
+        responses contain three ZK packets (``CMD_PREPARE_DATA``,
+        ``CMD_DATA``, ``CMD_ACK_OK``) and the middle one's header
+        bytes 4-7 are bulk-checksum data, not a real sid/rid. Updating
+        ``__session_id`` from that garbled value used to corrupt the
+        session and break subsequent commands.
         """
         if not self.tcp:
             return b''
@@ -766,6 +778,30 @@ class ZK:
                     print(f'  [raw] cmd={command_code} attempt={attempt + 1} '
                           f'raw={len(all_raw)} payload={len(payload)}')
                 if payload and len(payload) >= 8:
+                    # Sync __reply_id from the final ACK packet.  Walk
+                    # the raw TCP stream looking for a CMD_ACK_OK /
+                    # CMD_ACK_ERROR ZK header and take its rid.  This
+                    # mirrors the proven logic in wl10_probe_write.py
+                    # (raw_send_recv).  Only reply_id is updated;
+                    # session_id is kept (see docstring).
+                    pos = 0
+                    while pos + 16 <= len(all_raw):
+                        m1, m2, dsize = unpack('<HHI', all_raw[pos:pos + 8])
+                        if (m1 == const.MACHINE_PREPARE_DATA_1
+                                and m2 == const.MACHINE_PREPARE_DATA_2
+                                and 0 < dsize <= len(all_raw) - pos
+                                and dsize >= 8):
+                            pcmd, _ck, _sid, rid = unpack(
+                                '<4H', all_raw[pos + 8:pos + 16])
+                            if pcmd in (const.CMD_ACK_OK, const.CMD_ACK_ERROR):
+                                self.__reply_id = rid
+                                if self.verbose:
+                                    print(f'  [raw] synced reply_id={rid} '
+                                          f'from cmd={pcmd}')
+                                break
+                            pos += 8 + dsize
+                        else:
+                            pos += 1
                     return payload
                 if self.verbose:
                     print('  [raw] payload too small, retrying')
@@ -1275,10 +1311,18 @@ class ZK:
                 f'got {len(command_string)}B')
 
         # Settle device state before write (firmware requirement)
+        if self.verbose:
+            print(f'  [wl10_set_user] before refresh: reply_id={self.__reply_id} '
+                  f'session_id={self.__session_id}')
         self._wl10_refresh_data()
+        if self.verbose:
+            print(f'  [wl10_set_user] after refresh: reply_id={self.__reply_id}')
 
         buf = self.__create_header(const.CMD_USER_WRQ, command_string,
                                    self.__session_id, self.__reply_id)
+        if self.verbose:
+            print(f'  [wl10_set_user] write header built with reply_id={self.__reply_id}, '
+                  f'header reply_id={unpack("<4H", buf[:8])[3]}')
         top = self.__create_tcp_top(buf)
 
         for _ in range(2):
@@ -1327,7 +1371,7 @@ class ZK:
                 return False
             uid = users[0].uid
 
-        command_string = pack('<h', uid)
+        command_string = pack('<H', uid)
 
         # Settle device state before delete (firmware requirement)
         self._wl10_refresh_data()

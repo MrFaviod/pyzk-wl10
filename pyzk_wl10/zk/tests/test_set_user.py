@@ -222,9 +222,9 @@ class TestWl10DeleteUser:
         assert inst._ZK__reply_id == 9001
 
     def test_delete_payload_format(self):
-        """Verify the delete command_string is pack('<h', uid) — 2 bytes."""
+        """Verify the delete command_string is pack('<H', uid) — 2 bytes."""
         inst = _build_wl10_zk(ack_cmd=const.CMD_ACK_OK, ack_rid=100)
         inst.wl10_delete_user(uid=42)
         payload = _first_send_payload(inst._ZK__sock)
         assert len(payload) == 2
-        assert unpack('<h', payload)[0] == 42
+        assert unpack('<H', payload)[0] == 42
