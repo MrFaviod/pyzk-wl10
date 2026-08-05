@@ -47,7 +47,7 @@ class TestParseAttendance:
     def test_parse_skips_old_year(self, zk_instance):
         ts = encode_zk_time(datetime(1999, 12, 31, 23, 59, 59))
         rec = pack_attendance_record(
-            uid=200, user_id=b'200', flag=1, timestamp=ts, status=0)
+            uid=1000, user_id=b'1000', flag=1, timestamp=ts, status=0)
         raw = pack_bulk_response(rec, WL10_ATT_RECORD_SIZE)
         atts = zk_instance._wl10_parse_attendance(raw)
         assert len(atts) == 0, 'Should skip 1999-timestamp records'
