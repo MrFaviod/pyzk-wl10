@@ -1229,7 +1229,7 @@ class ZK:
 
         Parameters match :meth:`set_user`::
 
-            zk.wl10_set_user(uid=200, name='Alice', privilege=0,
+            zk.wl10_set_user(uid=1000, name='Alice', privilege=0,
                              user_id='999950', card=0)
 
         :param verify_mode: authentication method the terminal uses for
@@ -1309,7 +1309,7 @@ class ZK:
 
         Parameters match :meth:`delete_user`::
 
-            zk.wl10_delete_user(uid=200)
+            zk.wl10_delete_user(uid=1000)
             zk.wl10_delete_user(user_id='999950')
 
         Returns ``True`` if the device ACKed the deletion.
