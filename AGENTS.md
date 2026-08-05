@@ -11,14 +11,14 @@ This is a fork of `fananimi/pyzk` that adds support for **ZK WL10 / AK3750** fin
 ### Read Path (already existed in fork)
 - **Bulk read users**: `CMD=9 (USERTEMP_RRQ)` with empty payload → `CMD_PREPARE_DATA=1500` + 12B section header + N × 72B records
 - **Bulk read attendance**: `CMD=13 (ATTLOG_RRQ)` with empty payload → `CMD_PREPARE_DATA=1500` + 12B section header + N × 22B records
-- records
 - Uses raw socket (`_wl10_read_raw_command`) because standard buffered read truncates responses
 
-### Write Path (NEW — implemented in this fork)
+### Write Path (implemented in this fork)
 | Operation | Command | Payload | Response |
 |-----------|---------|---------|----------|
 | Write user | `CMD=8 (USER_WRQ)` | 72B (`HB8s24s4sx7sx24s`) | `ACK_OK=2000` |
 | Delete user | `CMD=18 (DELETE_USER)` | 2B `pack('<h', uid)` | `ACK_OK=2000`¹ |
+| Reboot | `CMD=2 (CMD_RESTART)` | empty | `ACK_OK=2000` |
 | Housekeeping | `CMD=1013 (REFRESHDATA)` | empty | `ACK_OK=2000` |
 
 ¹ Device returns `ACK_OK` but **does not persist deletion** on tested firmware (Ver 6.60). Method provided for firmwares where it works.
@@ -34,13 +34,15 @@ This is a fork of `fananimi/pyzk` that adds support for **ZK WL10 / AK3750** fin
 /home/informatica/zk2/
 ├── listar_marcaciones.py          # CLI: dump attendance with filters
 ├── wl10_probe_write.py            # One-off probe script for reverse-engineering write protocol
+├── check_device.py                # Portable Windows diagnostic script (test UIDs > 999)
+├── test_wl10_write.py             # Live-device E2E test for wl10_set_user/delete_user
 ├── README.md                       # Full protocol docs
 ├── AGENTS.md                       # This file
 └── pyzk_wl10/
     └── zk/
         ├── __init__.py
         ├── attendance.py           # Attendance dataclass + ZK timestamp decode
-        ├── base.py                 # Main ZK class (2000+ lines)
+        ├── base.py                 # Main ZK class (2160 lines)
         ├── const.py                # Protocol constants (CMD_*, WL10_*_RECORD_SIZE)
         ├── exception.py            # ZKErrorConnection, ZKErrorResponse, ZKNetworkError
         ├── finger.py               # Fingerprint template class
@@ -53,9 +55,12 @@ This is a fork of `fananimi/pyzk` that adds support for **ZK WL10 / AK3750** fin
             ├── test_parse_attendance.py
             ├── test_parse_users.py
             ├── test_scan_user_id.py
-            ├── test_set_user.py    # NEW: 12 tests for wl10_set_user / wl10_delete_user
+            ├── test_set_user.py    # 20 tests: wl10_set_user / wl10_delete_user + guards
+            ├── test_socket_mss.py  # TCP MSS / chunking tests
             ├── test_strip_header.py
-            └── test_decode_time.py
+            ├── test_wl10_raw_drain.py  # Raw socket drain / framing tests
+            ├── test_wl10_reboot.py     # wl10_reboot guards + ACK handling
+            └── test_wl10_resilience.py # Dedup, missing-user, truncated-read resilience
 ```
 
 ## Key Classes & Methods
@@ -68,14 +73,21 @@ This is a fork of `fananimi/pyzk` that adds support for **ZK WL10 / AK3750** fin
 - `wl10_get_attendance()` → `list[Attendance]`
 - `wl10_set_user(uid=None, name='', privilege=0, password='', group_id='', user_id='', card=0)` → `bool`
 - `wl10_delete_user(uid=0, user_id='')` → `bool`
+- `wl10_reboot()` → `bool` — reboots the device via `CMD_RESTART` over raw TCP path; marks connection closed on success
 
 **Internal WL10 helpers** (prefixed `_wl10_`):
+- `_wl10_read_sizes(self)` — query device capacities (user/attlog counts)
 - `_wl10_read_raw_command(cmd)` — raw socket send + full recv (does NOT update `__session_id`/`__reply_id`)
 - `_wl10_read_bulk_data(cmd, function_code)` — raw bulk read with fallback to buffered
 - `_wl10_extract_tcp_payloads(raw)` — strip TCP framing, concat ZK payloads
 - `_wl10_strip_header(raw, record_size)` — strip 12B section header, return `(records_bytes, count)`
+- `_wl10_bulk_is_complete(raw, record_size)` — check whether a bulk read is complete
+- `_wl10_build_users_map(users)` — build `{uid: User}` lookup for attendance enrichment
 - `_wl10_parse_users(raw)` / `_wl10_parse_attendance(raw, users_map)`
+- `_wl10_decode_user_record(rec)` — decode a single 72B user record
+- `_wl10_scan_user_id(rec)` — scan user_id field handling null-terminator
 - `_wl10_read_ack()` — read simple ACK (dsize=8), return `(cmd, rid)` and **synchronizes `__reply_id`**
+- `_wl10_refresh_data()` — send `CMD_REFRESHDATA` to settle device state between operations
 
 ### `zk.const` — Protocol constants
 ```python
@@ -105,6 +117,9 @@ zk.wl10_set_user(uid=1001, name='Bob', privilege=14, user_id='999951')  # ADMIN
 # Delete (returns True but may not persist on this firmware)
 zk.wl10_delete_user(uid=1000)
 
+# Reboot the device (connection becomes unusable after this)
+zk.wl10_reboot()
+
 zk.disconnect()
 ```
 
@@ -116,14 +131,16 @@ cd /home/informatica/zk2
 python3 -m pytest pyzk_wl10/zk/tests/ -v
 ```
 
-**49 tests total**:
+**91 tests total**:
 - 39 original parser/fixture tests
-- 10 new write/delete tests (`test_set_user.py`):
+- 20 write/delete tests (`test_set_user.py`):
   - 2 guards (`wl10=False`, `tcp=False`)
   - 3 payload format (72B, privilege clamp, admin passthrough)
   - 2 ACK handling (error, no response)
   - 4 `__reply_id` sync (after write OK, ACK_ERROR, consecutive writes, delete)
   - 5 delete guards + payload + sync
+  - 4 reboot guards + ACK handling (`test_wl10_reboot.py`)
+- 32 additional tests: socket MSS/chunking, raw drain/framing, strip header, resilience (dedup, missing-user, truncated-read)
 
 ## Probe Script (One-off)
 
@@ -138,6 +155,14 @@ Features:
 - Deletes via CMD=18 + `pack('<h', uid)`
 - Deletion verification
 - Structured report with PASS/FAIL summary
+
+## Live-Device E2E Test
+
+```bash
+python3 test_wl10_write.py 192.168.180.201 --verbose
+```
+
+Validates `wl10_set_user` / `wl10_delete_user` / `wl10_reboot` against a real device. Includes finally/disconnect cleanup. Excluded from ruff linting (live-device probe script).
 
 ## Known Limitations
 
@@ -165,6 +190,21 @@ python3 listar_marcaciones.py 192.168.180.201 --since 2026-07-01 --csv
 ## Git History
 
 ```
+3f18251  test: add live-device E2E test script for wl10_set_user/delete_user
+4390227  fix: replace .encode('hex') with codecs.encode() in base.py
+b36f3d3  feat: test UIDs > 999 + portable Windows diagnostic script
+bf9acdc  docs: use uid 1000/1001 in wl10 write docstring examples
+ad47549  fix: dedupe duplicate WL10 attendance records
+194f573  feat: retry truncated WL10 bulk reads (users/attendance)
+5b385ce  fix: restore broken_header reconstruction in __recieve_chunk
+6b021dd  refactor: wl10_probe_write.py unused unpack + noqa + style
+b51b0b2  refactor: tests sweep — unused imports, dead locals, import sort
+1fe381c  refactor: listar_marcaciones.py dead locals + import sort
+dbf2df4  refactor: base.py style cleanup (lint fixes + dead code)
+504dd6f  chore: expand ruff ignores for base.py legacy
+4b7b68e  refactor: modernize zk model classes (attendance/user/finger)
+fabd71c  chore: add ruff config + clean encoding decls in zk package
+b3ce60e  chore: ignore .omo/ OpenCode agent workspace
 210f4ea  feat: implement wl10_set_user + wl10_delete_user (with reply_id sync fix)
 3a227f7  test: add pytest fixtures + 39 tests for WL10 parsers
 f4f4b70  Fix WL10/AK3750 record parsing to match real on-wire format
@@ -175,11 +215,16 @@ fc44280  Initial commit: pyzk WL10 fork
 
 | File | Purpose |
 |------|---------|
-| `pyzk_wl10/zk/base.py:1114` | `wl10_set_user` implementation |
-| `pyzk_wl10/zk/base.py:1185` | `wl10_delete_user` implementation |
-| `pyzk_wl10/zk/base.py:1083` | `_wl10_read_ack` — **critical**: syncs `__reply_id` |
-| `pyzk_wl10/zk/tests/test_set_user.py` | 12 comprehensive tests |
+| `pyzk_wl10/zk/base.py:1221` | `wl10_set_user` implementation |
+| `pyzk_wl10/zk/base.py:1307` | `wl10_delete_user` implementation |
+| `pyzk_wl10/zk/base.py:1358` | `wl10_reboot` implementation |
+| `pyzk_wl10/zk/base.py:1157` | `_wl10_read_ack` — **critical**: syncs `__reply_id` |
+| `pyzk_wl10/zk/tests/test_set_user.py` | 20 comprehensive tests |
+| `pyzk_wl10/zk/tests/test_wl10_reboot.py` | 4 reboot guard + ACK tests |
+| `pyzk_wl10/zk/tests/test_wl10_resilience.py` | Dedup, missing-user, truncated-read tests |
 | `wl10_probe_write.py` | Live device probe reference |
+| `test_wl10_write.py` | Live-device E2E test script |
+| `check_device.py` | Portable Windows diagnostic (UIDs > 999) |
 | `README.md` | Full protocol documentation |
 
 ## Critical Implementation Notes for Future Agents
@@ -193,4 +238,4 @@ fc44280  Initial commit: pyzk WL10 fork
 
 ---
 
-*Generated for pyzk_wl10 fork — commit 210f4ea (feat: wl10_set_user + wl10_delete_user with reply_id sync)*
+*Generated for pyzk_wl10 fork — commit 3f18251 (test: add live-device E2E test script)*
