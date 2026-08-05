@@ -36,6 +36,7 @@ This is a fork of `fananimi/pyzk` that adds support for **ZK WL10 / AK3750** fin
 ├── wl10_probe_write.py            # One-off probe script for reverse-engineering write protocol
 ├── check_device.py                # Portable Windows diagnostic script (test UIDs > 999)
 ├── test_wl10_write.py             # Live-device E2E test for wl10_set_user/delete_user
+├── test_runner_wl10.py            # Live-device test runner (uid <= 1000, user_id >= 9999, no overwrite, no delete)
 ├── README.md                       # Full protocol docs
 ├── AGENTS.md                       # This file
 └── pyzk_wl10/
@@ -164,12 +165,22 @@ python3 test_wl10_write.py 192.168.180.201 --verbose
 
 Validates `wl10_set_user` / `wl10_delete_user` / `wl10_reboot` against a real device. Includes finally/disconnect cleanup. Excluded from ruff linting (live-device probe script).
 
+## Live-Device Test Runner
+
+```bash
+python3 test_runner_wl10.py 192.168.120.80 192.168.130.107 --verbose
+```
+
+Read-only baseline → picks free uids (≤ 1000, avoiding existing) + free user_ids (≥ 9999) → writes 2 test users (regular + admin) → read-back verification → NO delete. Hard constraints: no overwrite, no delete, test users left on device.
+
 ## Known Limitations
 
-1. **Delete does not persist** on AK3750 Ver 6.60 — device ACKs but user remains. This is a firmware limitation.
-2. **Concurrent writes require `refresh_data()` between calls** (or the `__reply_id` sync introduced in the fix). Without it, the device returns `ACK_ERROR` on the second write.
-3. **No fingerprint/template write support** — only basic user records.
-4. **Badge/user_id limited to 6 chars (max 999999)** due to 24B ASCII field.
+1. **Max uid = 1000** on AK3750 Ver 6.60 — device rejects uid > 1000 with `ACK_ERROR`. This is a firmware limitation. Use uids ≤ 1000 (avoiding existing users) and set `user_id` (badge string) to values ≥ 9999 for test isolation.
+2. **Delete persists on tested devices** (192.168.120.80, 192.168.130.107) — contrary to earlier belief. `wl10_delete_user` uses `pack('<H', uid)` (unsigned short) to support uids up to 65535.
+3. **Concurrent writes require `refresh_data()` between calls** — the `__reply_id` sync in `_wl10_read_raw_command` keeps the client in sync with the device's incrementing reply_id after bulk reads. Without it, writes after `wl10_get_users()` fail with `ACK_ERROR`.
+4. **No fingerprint/template write support** — only basic user records.
+5. **Badge/user_id limited to 6 chars (max 999999)** due to 24B ASCII field.
+6. **`_wl10_read_sizes()` returns False** on this firmware — device capacities cannot be queried.
 
 ## Common Commands
 
@@ -182,6 +193,9 @@ python3 -m pytest pyzk_wl10/zk/tests/test_set_user.py -v
 
 # Probe live device
 python3 wl10_probe_write.py 192.168.180.201 --verbose
+
+# Live-device test runner (write + verify, no delete)
+python3 test_runner_wl10.py 192.168.120.80 192.168.130.107 --verbose
 
 # CLI dump attendance
 python3 listar_marcaciones.py 192.168.180.201 --since 2026-07-01 --csv
@@ -224,18 +238,20 @@ fc44280  Initial commit: pyzk WL10 fork
 | `pyzk_wl10/zk/tests/test_wl10_resilience.py` | Dedup, missing-user, truncated-read tests |
 | `wl10_probe_write.py` | Live device probe reference |
 | `test_wl10_write.py` | Live-device E2E test script |
+| `test_runner_wl10.py` | Live-device test runner (uid ≤ 1000, user_id ≥ 9999, no overwrite/delete) |
 | `check_device.py` | Portable Windows diagnostic (UIDs > 999) |
 | `README.md` | Full protocol documentation |
 
 ## Critical Implementation Notes for Future Agents
 
 1. **Never break the read path** — `wl10_get_users` / `wl10_get_attendance` must remain unchanged.
-2. **`__reply_id` must be synchronized** after every raw write — done in `_wl10_read_ack` returning `(cmd, rid)`. Caller must update `self._ZK__reply_id = ack_rid`.
+2. **`__reply_id` must be synchronized** after every raw write AND after every bulk read — `_wl10_read_raw_command` now syncs `__reply_id` from the `CMD_ACK_OK`/`CMD_ACK_ERROR` packet in the bulk response stream. `_wl10_read_ack` returns `(cmd, rid)` for write/delete ACKs. Callers must update `self._ZK__reply_id = ack_rid`.
 3. **Use raw TCP path for writes** — `__send_command` doesn't work with WL10 bulk responses.
 4. **Badge pool**: Use 999950–999999 for test users (6-char limit).
-4. **Privilege values**: `0 = USER_DEFAULT`, `14 = USER_ADMIN`. Anything else clamps to `0`.
-5. **Refresh_data() required** between bulk operations to settle device state.
+5. **Privilege values**: `0 = USER_DEFAULT`, `14 = USER_ADMIN`. Anything else clamps to `0`.
+6. **Refresh_data() required** between bulk operations to settle device state.
+7. **`__session_id` is NOT updated** by `_wl10_read_raw_command` — bulk-read `CMD_DATA` packets have garbled sid bytes 4-7; updating from them corrupts the session.
 
 ---
 
-*Generated for pyzk_wl10 fork — commit 3f18251 (test: add live-device E2E test script)*
+*Generated for pyzk_wl10 fork — commit 853852b (docs: sync AGENTS.md to current state)*
