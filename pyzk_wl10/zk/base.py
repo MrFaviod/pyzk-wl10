@@ -319,7 +319,28 @@ class ZK:
         self.__create_socket()
         self.__session_id = 0
         self.__reply_id = const.USHRT_MAX - 1
-        cmd_response = self.__send_command(const.CMD_CONNECT)
+        if self.wl10 and self.tcp:
+            # Flapping VPN: a single blocking CMD_CONNECT attempt is a coin
+            # flip (~50% up/down duty on the Bella Vista tunnel). Retry with
+            # a clamped per-attempt timeout so a dead tunnel fails fast;
+            # LAN devices reply on attempt 1 and never exercise the loop.
+            old_timeout = self.__timeout
+            try:
+                for attempt in range(3):
+                    self.__timeout = min(self.__timeout, 5)
+                    try:
+                        cmd_response = self.__send_command(const.CMD_CONNECT)
+                        break
+                    except ZKNetworkError:
+                        if attempt == 2:
+                            raise
+                        self.__create_socket()
+                        self.__session_id = 0
+                        self.__reply_id = const.USHRT_MAX - 1
+            finally:
+                self.__timeout = old_timeout
+        else:
+            cmd_response = self.__send_command(const.CMD_CONNECT)
         self.__session_id = self.__header[2]
         if cmd_response.get('code') == const.CMD_ACK_UNAUTH:
             if self.verbose:

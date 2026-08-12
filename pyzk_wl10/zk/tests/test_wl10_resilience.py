@@ -311,3 +311,58 @@ class TestWl10ReconnectClamp:
         inst._wl10_reconnect()
 
         assert inst._ZK__timeout == 15, 'Original timeout restored after success'
+
+
+class TestConnectHandshakeRetry:
+    """``connect()`` must retry the CMD_CONNECT handshake on a flapping
+    VPN: the tunnel to vpn-device is ~50% up/down and a single blocking
+    ``__send_command(CMD_CONNECT)`` attempt (base.py L322) is a coin flip.
+    The retry is gated to wl10+TCP and each attempt is clamped to
+    ``min(self.__timeout, 5)`` so a dead tunnel fails fast; LAN devices
+    reply on attempt 1, so the loop is never exercised there.
+    """
+
+    def _inst_for_connect(self):
+        inst = _build_wl10_zk()
+        inst.is_connect = False
+        inst._ZK__timeout = 15
+        inst.ommit_ping = True
+        inst.force_udp = False
+        inst.helper = MagicMock()
+        inst.helper.test_tcp.return_value = 0
+        inst._ZK__create_socket = MagicMock()
+        inst.get_platform = MagicMock(return_value='')
+        inst.get_device_name = MagicMock(return_value='')
+        inst._ZK__header = [const.CMD_ACK_OK, 0, 12345, 0]
+        return inst
+
+    def test_connect_retries_handshake_on_timeout(self):
+        inst = self._inst_for_connect()
+        inst._ZK__send_command = MagicMock(
+            side_effect=[ZKNetworkError('timed out'),
+                         {'status': True, 'code': const.CMD_ACK_OK}])
+
+        result = inst.connect()
+
+        assert result is inst
+        assert inst._ZK__send_command.call_count == 2
+
+    def test_connect_success_on_first_attempt_single_call(self):
+        inst = self._inst_for_connect()
+        inst._ZK__send_command = MagicMock(
+            return_value={'status': True, 'code': const.CMD_ACK_OK})
+
+        result = inst.connect()
+
+        assert result is inst
+        assert inst._ZK__send_command.call_count == 1
+
+    def test_connect_raises_after_retries_exhausted(self):
+        inst = self._inst_for_connect()
+        inst._ZK__send_command = MagicMock(
+            side_effect=ZKNetworkError('timed out'))
+
+        with pytest.raises(ZKNetworkError):
+            inst.connect()
+
+        assert inst._ZK__send_command.call_count == 3
