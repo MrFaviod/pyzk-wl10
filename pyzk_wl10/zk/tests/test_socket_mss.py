@@ -7,6 +7,7 @@ responses (up to ~3200B) exceed the MTU and never arrive -> timeout.
 Forcing TCP_MAXSEG=1200 makes the device's segments fit the path MTU.
 """
 import socket as _socket
+from unittest.mock import MagicMock
 
 import zk.base as base_module
 from zk.base import ZK
@@ -84,3 +85,69 @@ class TestSocketCreation:
             for args in seen
         ), f'expected setsockopt(IPPROTO_TCP, TCP_MAXSEG, 1200) in {seen}'
         zk._ZK__sock.close()
+
+
+class TestSetsockoptSafety:
+    """Windows safety: Winsock has no TCP_MAXSEG (bpo-23302), so
+    setsockopt(IPPROTO_TCP, TCP_MAXSEG, ...) raises OSError and must be
+    swallowed by __create_socket — while still applying on platforms that
+    support it."""
+
+    def test_tcp_maxseg_setsockopt_oserror_is_swallowed(self, monkeypatch):
+        """setsockopt raising OSError (Windows) must not propagate out of
+        __create_socket; the socket must still be created."""
+        zk = _build_zk(tcp_maxseg=1200)
+        real_setsockopt = _socket.socket.setsockopt
+
+        class FailingSocket(_socket.socket):
+            def setsockopt(self, *args):
+                if len(args) >= 3 and args[1] == _socket.TCP_MAXSEG:
+                    raise OSError('TCP_MAXSEG not supported')
+                return real_setsockopt(self, *args)
+
+        monkeypatch.setattr(base_module, 'socket', FailingSocket)
+        zk._ZK__create_socket()  # must not raise
+        assert zk._ZK__sock is not None
+        zk._ZK__sock.close()
+
+    def test_tcp_maxseg_setsockopt_success_still_applies(self, monkeypatch):
+        """On platforms where TCP_MAXSEG exists, setsockopt must still be
+        called exactly once with (IPPROTO_TCP, TCP_MAXSEG, 1200)."""
+        zk = _build_zk(tcp_maxseg=1200)
+        seen = []
+        real_setsockopt = _socket.socket.setsockopt
+
+        class RecordingSocket(_socket.socket):
+            def setsockopt(self, *args):
+                seen.append(args)
+                return real_setsockopt(self, *args)
+
+        monkeypatch.setattr(base_module, 'socket', RecordingSocket)
+        zk._ZK__create_socket()
+        assert seen == [(_socket.IPPROTO_TCP, _socket.TCP_MAXSEG, 1200)], \
+            f'expected exactly one setsockopt(IPPROTO_TCP, TCP_MAXSEG, 1200), got {seen}'
+        zk._ZK__sock.close()
+
+
+class TestSocketTeardown:
+    """__create_socket must close the previous socket before creating a new
+    one so reconnects don't leak file descriptors."""
+
+    def test_create_socket_closes_old_socket(self, monkeypatch):
+        """A pre-existing ``__sock`` (MagicMock) must be closed exactly once
+        and replaced by the freshly created socket."""
+        zk = _build_zk()
+        old_sock = MagicMock()
+        zk._ZK__sock = old_sock
+
+        new_sock = MagicMock()
+
+        def fake_socket(*_args, **_kwargs):
+            return new_sock
+
+        monkeypatch.setattr(base_module, 'socket', fake_socket)
+        zk._ZK__create_socket()
+        assert old_sock.close.called
+        assert old_sock.close.call_count == 1
+        assert zk._ZK__sock is new_sock
+        assert zk._ZK__sock is not old_sock

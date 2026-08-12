@@ -36,6 +36,10 @@ def main():
     parser.add_argument('--csv', action='store_true', help='Salida en formato CSV')
     parser.add_argument('--since', help='Filtrar desde fecha (YYYY-MM-DD)')
     parser.add_argument('--until', help='Filtrar hasta fecha (YYYY-MM-DD)')
+    parser.add_argument('--tcp-maxseg', type=int, default=None,
+                        help='TCP_MAXSEG to set before connect (e.g. 1200 for VPN/PMTUD blackhole routes)')
+    parser.add_argument('--gap-timeout', type=int, default=None,
+                        help='Inter-chunk drain grace in seconds (default 1; VPN profile for vpn-device uses 3)')
     args = parser.parse_args()
 
     since_date = datetime.strptime(args.since, '%Y-%m-%d').date() if args.since else None
@@ -44,7 +48,8 @@ def main():
 
     zk = ZK(args.ip, port=args.port, timeout=args.timeout,
             password=args.password, ommit_ping=True, force_udp=False,
-            wl10=not args.no_wl10)
+            wl10=not args.no_wl10, tcp_maxseg=args.tcp_maxseg,
+            gap_timeout=args.gap_timeout)
     zk.connect()
 
     dev_name = zk.get_device_name() or ''

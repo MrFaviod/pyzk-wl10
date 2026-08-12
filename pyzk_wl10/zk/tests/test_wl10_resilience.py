@@ -17,7 +17,7 @@ from helpers import encode_zk_time, pack_attendance_record, pack_bulk_response, 
 
 from zk import const
 from zk.base import ZK
-from zk.exception import ZKErrorResponse
+from zk.exception import ZKErrorResponse, ZKNetworkError
 from zk.user import User
 
 
@@ -235,3 +235,79 @@ class TestWl10AttendanceMissingUser:
         assert len(att) == 2
         by_badge = {a.badge: a for a in att}
         assert by_badge['999'].status == 1, 'Record with missing user still parsed'
+
+
+class TestWl10MssRecoveryRetry:
+    """MSS escalation must retry the recovery cycle: on a flapping VPN
+    (observed ~50% up/down duty on vpn-device) a single recovery attempt is
+    a coin flip. Multiple clamped cycles raise the catch probability
+    while staying LAN-inert (LAN devices end on the terminal ACK in
+    attempt 1 and never reach escalation)."""
+
+    def _inst_failing_recovery(self):
+        inst = _build_wl10_zk()
+        inst._wl10_get_users = MagicMock(
+            return_value=[User(uid=26, name='Alice', privilege=0, user_id='26')])
+        inst._wl10_read_bulk_data = MagicMock(return_value=b'')  # always incomplete
+        inst.tcp_maxseg = None
+        return inst
+
+    def test_escalation_retries_reconnect_when_first_fails(self):
+        inst = self._inst_failing_recovery()
+        inst._wl10_reconnect = MagicMock(side_effect=ZKNetworkError('link down'))
+        with pytest.raises(ZKErrorResponse, match='complete attendance log'):
+            with patch('zk.base.time.sleep'):
+                inst._wl10_get_attendance()
+        assert inst._wl10_reconnect.call_count >= 2
+
+    def test_escalation_succeeds_after_flaky_reconnect(self):
+        inst = self._inst_failing_recovery()
+        calls = {'n': 0}
+
+        def flaky():
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise ZKNetworkError('link down')
+            inst._wl10_read_bulk_data = MagicMock(
+                return_value=pack_bulk_response(
+                    _one_attendance_record(), const.WL10_ATT_RECORD_SIZE))
+
+        inst._wl10_reconnect = MagicMock(side_effect=flaky)
+        with patch('zk.base.time.sleep'):
+            att = inst._wl10_get_attendance()
+        assert len(att) == 1
+        assert calls['n'] >= 2
+
+
+class TestWl10ReconnectClamp:
+    """``_wl10_reconnect`` must bound the re-handshake cost on a broken
+    link: ``connect()`` blocks ``self.__timeout`` per ``__send_command``
+    call (e.g. 15s), and the MSS-escalation path can loop. The clamp
+    (``min(self.__timeout, 5)``) bounds the worst case, and the original
+    timeout + ``ommit_ping`` are restored in all outcomes.
+    """
+
+    def test_timeout_clamped_and_restored_on_failure(self):
+        inst = _build_wl10_zk()
+        inst._ZK__timeout = 15
+        inst.ommit_ping = False
+        inst.connect = MagicMock(side_effect=ZKNetworkError('link down'))
+
+        with pytest.raises(ZKNetworkError):
+            inst._wl10_reconnect()
+
+        assert inst._ZK__timeout == 15, 'Original timeout restored after failure'
+        assert inst.ommit_ping is False, 'ommit_ping restored after failure'
+
+    def test_clamp_applied_during_connect_then_restored(self):
+        inst = _build_wl10_zk()
+        inst._ZK__timeout = 15
+        inst.ommit_ping = False
+
+        def fake_connect():
+            assert inst._ZK__timeout == 5, 'Clamped to min(15, 5) during handshake'
+
+        inst.connect = fake_connect
+        inst._wl10_reconnect()
+
+        assert inst._ZK__timeout == 15, 'Original timeout restored after success'
