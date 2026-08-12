@@ -88,7 +88,7 @@ class ZK:
     below for the protocol details.
     """
 
-    def __init__(self, ip, port=4370, timeout=60, password=0, force_udp=False, ommit_ping=False, verbose=False, encoding='UTF-8', wl10=False, tcp_maxseg=None):
+    def __init__(self, ip, port=4370, timeout=60, password=0, force_udp=False, ommit_ping=False, verbose=False, encoding='UTF-8', wl10=False, tcp_maxseg=None, gap_timeout=1):
         User.encoding = encoding
         self.__address = (ip, port)
         self.__sock = socket(AF_INET, SOCK_DGRAM)
@@ -127,17 +127,29 @@ class ZK:
         self.end_live_capture = False
         self.wl10 = wl10
         self.tcp_maxseg = tcp_maxseg
+        # Normalize None -> 1: CLIs pass gap_timeout=None (argparse
+        # default) explicitly, which would otherwise poison the drain's
+        # adaptive-gap arithmetic with a TypeError.
+        self.gap_timeout = 1 if gap_timeout is None else gap_timeout
         self.platform = ''
 
     def __nonzero__(self):
         return self.is_connect
 
     def __create_socket(self):
+        if getattr(self, '_ZK__sock', None) is not None:
+            try:
+                self.__sock.close()
+            except OSError:
+                pass
         if self.tcp:
             self.__sock = socket(AF_INET, SOCK_STREAM)
             self.__sock.settimeout(self.__timeout)
             if self.tcp_maxseg:
-                self.__sock.setsockopt(IPPROTO_TCP, TCP_MAXSEG, self.tcp_maxseg)
+                try:
+                    self.__sock.setsockopt(IPPROTO_TCP, TCP_MAXSEG, self.tcp_maxseg)
+                except OSError:
+                    pass  # e.g. Windows: TCP_MAXSEG not supported (bpo-23302)
             self.__sock.connect_ex(self.__address)
         else:
             self.__sock = socket(AF_INET, SOCK_DGRAM)
@@ -721,29 +733,135 @@ class ZK:
                 pos += 1
         return payload
 
+    @staticmethod
+    def _wl10_scan_for_terminal_ack(raw_data):
+        """Walk the framed TCP stream and return the LAST terminal ACK.
+
+        WL10 frames every ZK packet as
+        ``MACHINE_PREPARE_DATA_1 | MACHINE_PREPARE_DATA_2 | dsize``
+        (8 bytes) followed by an 8-byte ZK header whose first uint16 is
+        the command code. A bulk response ends with one terminal ACK
+        (``CMD_ACK_OK`` or ``CMD_ACK_ERROR``); draining can stop as
+        soon as a complete terminal ACK is present.
+
+        Oracle (bg_58bcb925) verdict: drain termination is an
+        *optimization*, not the sole completion condition — incomplete
+        bulks still rely on the silence fallback + declared-length
+        check. ACK_ERROR terminates draining but is NOT success. We
+        record the last valid ACK (single terminal ACK in normal
+        traffic) for reply-id synchronization.
+
+        Returns ``(pcmd, rid)`` for the last valid framed terminal ACK,
+        or ``None`` when no terminal ACK is present. A frame is a valid
+        ACK candidate when: magic matches, ``dsize >= 8``, the full
+        frame is present, and ``pcmd`` is ``CMD_ACK_OK`` (2000) or
+        ``CMD_ACK_ERROR`` (2001). Never treats ``CMD_PREPARE_DATA``
+        (1500) or ``CMD_DATA`` (1501) as terminal — their sid bytes
+        are bulk-checksum data, not session state, and must not corrupt
+        the session (see ``__session_id`` note in ``_wl10_read_raw_command``).
+        """
+        last_ack = None
+        pos = 0
+        while pos + 16 <= len(raw_data):
+            magic1, magic2, dsize = unpack('<HHI', raw_data[pos:pos + 8])
+            if (magic1 == const.MACHINE_PREPARE_DATA_1
+                    and magic2 == const.MACHINE_PREPARE_DATA_2
+                    and dsize >= 8
+                    and dsize <= len(raw_data) - pos - 8):
+                pcmd, _ck, _sid, rid = unpack(
+                    '<4H', raw_data[pos + 8:pos + 16])
+                if pcmd in (const.CMD_ACK_OK, const.CMD_ACK_ERROR):
+                    last_ack = (pcmd, rid)
+                pos += 8 + dsize
+            else:
+                pos += 1
+        return last_ack
+
+    def _wl10_reconnect(self):
+        """Re-handshake after a broken WL10 connection.
+
+        Oracle (bg_58bcb925): the existing :meth:`disconnect` sends
+        ``CMD_EXIT`` first and only closes the socket on success, which
+        fails on a broken VPN link and would block recovery. This helper
+        instead marks the connection down, skips ping (ICMP may be
+        unavailable even when TCP recovery is possible — see the
+        Fortinet/Ubiquiti route notes), and lets :meth:`connect`
+        perform a fresh handshake.
+
+        ``__create_socket`` closes the old socket before re-creating,
+        so no file descriptor leaks.
+
+        The handshake is clamped to a short timeout: ``connect()`` blocks
+        ``self.__timeout`` (e.g. 15s) per ``__send_command`` call on a
+        broken link, and the MSS-escalation path can call this in a loop.
+        Clamping bounds the worst-case recovery cost; ``__create_socket``
+        re-applies the clamped value to the new socket, and the original
+        timeout is restored afterwards.
+        """
+        self.is_connect = False
+        old_ommit_ping = self.ommit_ping
+        old_timeout = self.__timeout
+        self.ommit_ping = True
+        self.__timeout = min(self.__timeout, 5)
+        try:
+            self.connect()
+        finally:
+            self.__timeout = old_timeout
+            self.ommit_ping = old_ommit_ping
+
     def _wl10_read_raw_command(self, command_code):
         """Send a command and read the entire response via raw recv.
 
-        Last-resort fallback for AK3750 firmwares whose TCP framing is
-        not understood by :meth:`__send_command`.
+        Resilient drain (Oracle bg_58bcb925 — general WL10 mode, no
+        per-IP special-casing):
 
-        ``__reply_id`` IS updated from the final ``CMD_ACK_OK`` /
-        ``CMD_ACK_ERROR`` packet echoed by the device — the device
-        advances its internal reply_id by one per command and echoes it
-        back in the ACK, so the client must track it to stay in sync.
-        Without this, a write issued after a bulk read (which used to
-        leave ``__reply_id`` stale) would be rejected with
-        ``ACK_ERROR``.
+        - **ACK-terminated**: after each ``recv`` we scan the accumulated
+          stream for a complete framed ``CMD_ACK_OK`` /
+          ``CMD_ACK_ERROR`` packet and break the inner drain loop as soon
+          as one is present. On a healthy LAN the terminal ACK lands in
+          the first chunk, so the drain ends *faster* than the historical
+          hard 1s silence timeout; over a jittery VPN the drain waits for
+          the ACK that signals "device done", which removes the gap-based
+          truncation that used to discard late-arriving segments.
+        - **Adaptive silence fallback**: when no terminal ACK is observed
+          (older firmware hedge), we stop on a silence timeout that grows
+          across the existing three attempts — ``gap_timeout``,
+          ``2 * gap_timeout``, ``4 * gap_timeout`` — each clamped by
+          ``self.__timeout``. The default ``gap_timeout`` is one second,
+          preserving LAN behaviour; a caller may raise it via the
+          ``gap_timeout`` kwarg / ``--gap-timeout`` CLI flag for known
+          slow links.
+        - **Declared-length completeness** is checked by the caller via
+          :meth:`_wl10_bulk_is_complete`; this method only drains.
 
-        ``__session_id`` is deliberately NOT updated: bulk-read
-        responses contain three ZK packets (``CMD_PREPARE_DATA``,
-        ``CMD_DATA``, ``CMD_ACK_OK``) and the middle one's header
-        bytes 4-7 are bulk-checksum data, not a real sid/rid. Updating
-        ``__session_id`` from that garbled value used to corrupt the
-        session and break subsequent commands.
+        Bookkeeping mirroring the pre-resilience behavior:
+
+        - ``__reply_id`` IS updated from the terminal ACK's rid (the
+          device advances its reply_id by one per command and echoes it
+          back, so the client must track it to stay in sync). Updated
+          even when the extracted payload is empty or the ACK is
+          ``CMD_ACK_ERROR`` (per Oracle: ERROR still advances rid).
+        - ``__session_id`` is deliberately NOT updated: bulk reads
+          contain three ZK packets (``CMD_PREPARE_DATA``, ``CMD_DATA``,
+          ``CMD_ACK_OK``) and the middle one's header bytes 4-7 are
+          bulk-checksum data, not a real sid/rid. Updating
+          ``__session_id`` from that garbled value corrupts the session.
+        - ``self._wl10_last_ack`` stores the last observed terminal ACK
+          as ``(pcmd, rid)`` so bulk callers can decide whether to
+          escalate MSS (no terminal ACK across all retries implies
+          PMTUD blackhole — segments never arrived).
         """
         if not self.tcp:
             return b''
+
+        # Instances built via object.__new__ in tests may lack attrs set
+        # via __init__; provide safe defaults so the drain works without
+        # a full constructor round-trip. None (CLI argparse default)
+        # normalizes to the 1s default too — __init__ already does this,
+        # but fixtures bypass the constructor.
+        self.gap_timeout = getattr(self, 'gap_timeout', 1) or 1
+        self.tcp_maxseg = getattr(self, 'tcp_maxseg', None)
+        self._wl10_last_ack = None
 
         for attempt in range(3):
             buf = self.__create_header(command_code, b'', self.__session_id, self.__reply_id)
@@ -756,14 +874,31 @@ class ZK:
                 return b''
 
             all_raw = b''
+            # First chunk: bounded by min(__timeout, 10) so a dead
+            # device doesn't pay the full timeout per attempt. Oracle:
+            # making every initial read wait the full timeout slows
+            # dead-device recovery unnecessarily.
             self.__sock.settimeout(min(self.__timeout, 10))
+            # Silence fallback grows across attempts, clamped by the
+            # connection timeout. Attempt 1 = gap_timeout (default 1 =
+            # historical LAN behaviour); 2 = 2x; 3 = 4x.
+            silence_gap = min(self.gap_timeout * (2 ** attempt),
+                              self.__timeout)
             try:
                 while True:
                     chunk = self.__sock.recv(65536)
                     if not chunk:
                         break
                     all_raw += chunk
-                    self.__sock.settimeout(1)
+                    # If a complete terminal ACK is now present, stop
+                    # draining — the device signaled end-of-response.
+                    last_ack = self._wl10_scan_for_terminal_ack(all_raw)
+                    if last_ack is not None:
+                        self._wl10_last_ack = last_ack
+                        break
+                    # Otherwise wait up to the adaptive silence gap for
+                    # the next chunk / ACK.
+                    self.__sock.settimeout(silence_gap)
             except timeout:
                 pass
             except Exception as e:
@@ -776,35 +911,24 @@ class ZK:
                 payload = self._wl10_extract_tcp_payloads(all_raw)
                 if self.verbose:
                     print(f'  [raw] cmd={command_code} attempt={attempt + 1} '
-                          f'raw={len(all_raw)} payload={len(payload)}')
+                          f'raw={len(all_raw)} payload={len(payload)} '
+                          f'ack={self._wl10_last_ack}')
+                # If we saw a terminal ACK, sync __reply_id from it and
+                # return — done regardless of payload size (the device
+                # told us it finished, possibly with an error).
+                if self._wl10_last_ack is not None:
+                    _pcmd, rid = self._wl10_last_ack
+                    self.__reply_id = rid
+                    if self.verbose:
+                        print(f'  [raw] synced reply_id={rid} from '
+                              f'cmd={self._wl10_last_ack[0]}')
+                    return payload
+                # No terminal ACK: accept any payload >= 8 (the
+                # silence fallback found *something*); otherwise retry.
                 if payload and len(payload) >= 8:
-                    # Sync __reply_id from the final ACK packet.  Walk
-                    # the raw TCP stream looking for a CMD_ACK_OK /
-                    # CMD_ACK_ERROR ZK header and take its rid.  This
-                    # mirrors the proven logic in wl10_probe_write.py
-                    # (raw_send_recv).  Only reply_id is updated;
-                    # session_id is kept (see docstring).
-                    pos = 0
-                    while pos + 16 <= len(all_raw):
-                        m1, m2, dsize = unpack('<HHI', all_raw[pos:pos + 8])
-                        if (m1 == const.MACHINE_PREPARE_DATA_1
-                                and m2 == const.MACHINE_PREPARE_DATA_2
-                                and 0 < dsize <= len(all_raw) - pos
-                                and dsize >= 8):
-                            pcmd, _ck, _sid, rid = unpack(
-                                '<4H', all_raw[pos + 8:pos + 16])
-                            if pcmd in (const.CMD_ACK_OK, const.CMD_ACK_ERROR):
-                                self.__reply_id = rid
-                                if self.verbose:
-                                    print(f'  [raw] synced reply_id={rid} '
-                                          f'from cmd={pcmd}')
-                                break
-                            pos += 8 + dsize
-                        else:
-                            pos += 1
                     return payload
                 if self.verbose:
-                    print('  [raw] payload too small, retrying')
+                    print('  [raw] payload too small / no ACK, retrying')
 
         return b''
 
@@ -836,16 +960,24 @@ class ZK:
                 if self.verbose:
                     print(f'  [wl10_bulk] strategy=raw failed: {e}')
 
-        # --- Strategy 2: standard buffered read (fallback) ---
-        try:
-            data, _size = self.read_with_buffer(command_code, function_code, 0)
-            if data and len(data) >= 4:
+        # --- Strategy 2: standard buffered read (fallback, UDP only) ---
+        # Deliberately gated to the UDP path. This firmware under-reports
+        # the payload length in a single TCP packet, so read_with_buffer
+        # truncates on TCP AND blocks self.__timeout per call on a broken
+        # link (it sends via __send_command). For TCP/WL10 the raw read
+        # above is the only reliable path; running this fallback on TCP
+        # just burns seconds of blocking time before returning b''.
+        if not self.tcp:
+            try:
+                data, _size = self.read_with_buffer(
+                    command_code, function_code, 0)
+                if data and len(data) >= 4:
+                    if self.verbose:
+                        print(f'  [wl10_bulk] strategy=buffered len={len(data)}')
+                    return data
+            except Exception as e:
                 if self.verbose:
-                    print(f'  [wl10_bulk] strategy=buffered len={len(data)}')
-                return data
-        except Exception as e:
-            if self.verbose:
-                print(f'  [wl10_bulk] strategy=buffered failed: {e}')
+                    print(f'  [wl10_bulk] strategy=buffered failed: {e}')
 
         return b''
 
@@ -928,11 +1060,22 @@ class ZK:
     def _wl10_get_users(self):
         """Read and parse the user table from the device.
 
-        Retries truncated reads (free_data + short backoff between
-        attempts) instead of returning a partial table, which used to
-        happen silently on unstable links (Bella Vista 110.152).
+        Resilient bulk read (Oracle bg_58bcb925 — general WL10 mode):
+
+        - Retries truncated reads (``free_data`` + short backoff between
+          attempts) instead of returning a partial table, which used to
+          happen silently on unstable links (Bella Vista 110.152).
+        - If all three attempts return an incomplete bulk AND none of
+          them observed a terminal ACK (no ``CMD_ACK_OK`` /
+          ``CMD_ACK_ERROR`` in the drained bytes — segments never
+          arrived, a classic PMTUD blackhole), and the caller did not
+          opt out via an explicit ``tcp_maxseg``, reconnect once with
+          an automatic MSS of 1200 and retry the bulk a single extra
+          time. Self-configuring; LAN devices that drain cleanly never
+          reach this path.
         """
         last_raw = b''
+        saw_ack = False
         for attempt in range(3):
             if attempt > 0:
                 # Settle the device between bulk reads; the AK3750
@@ -947,8 +1090,43 @@ class ZK:
             if self._wl10_bulk_is_complete(raw, const.WL10_USER_RECORD_SIZE):
                 return self._wl10_parse_users(raw)
             last_raw = raw
+            if getattr(self, '_wl10_last_ack', None) is not None:
+                saw_ack = True
             if self.verbose:
                 print(f'  [wl10_users] truncated/empty bulk (attempt {attempt + 1}), retrying')
+
+        # MSS escalation: PMTUD blackhole recovery for degraded VPN paths.
+        # Only when every prior attempt drained without a terminal ACK
+        # (segments dropped before reaching us) and the caller did not
+        # already set tcp_maxseg. Reconnect with MSS=1200 and retry a few
+        # clamped cycles: on a flapping tunnel a single recovery attempt
+        # is a coin flip, and each cycle is bounded by the clamp below.
+        if not saw_ack and self.tcp and not getattr(self, 'tcp_maxseg', None):
+            if self.verbose:
+                print('  [wl10_users] no terminal ACK seen across 3 attempts; '
+                      'reconnecting with MSS=1200 (PMTUD recovery)')
+            for _ in range(3):
+                try:
+                    self.tcp_maxseg = 1200
+                    self._wl10_reconnect()
+                    # Clamp the retry handshake+bulk so a half-broken VPN can't
+                    # block __timeout (e.g. 15s) per __send_command call here —
+                    # free_data and the buffered drain both stall on a broken
+                    # link, and the recovery window closes before it completes.
+                    old_timeout = self.__timeout
+                    self.__timeout = min(self.__timeout, 5)
+                    try:
+                        self.free_data()
+                        raw = self._wl10_read_bulk_data(
+                            const.CMD_USERTEMP_RRQ, const.FCT_USER)
+                    finally:
+                        self.__timeout = old_timeout
+                    if self._wl10_bulk_is_complete(raw, const.WL10_USER_RECORD_SIZE):
+                        return self._wl10_parse_users(raw)
+                    last_raw = raw
+                except Exception as e:
+                    if self.verbose:
+                        print(f'  [wl10_users] MSS recovery failed: {e}')
 
         raise ZKErrorResponse(
             f'Cannot read a complete user table from the device '
@@ -960,6 +1138,11 @@ class ZK:
         Users are read first so that we can resolve names / badges for
         every attendance record even if the second read disrupts the
         socket (which happens on some AK3750 firmwares).
+
+        PMTUD recovery mirrors :meth:`_wl10_get_users`: when every
+        attempt drained without a terminal ACK the device's bulk
+        segments never reached us, so we reconnect with MSS=1200 and
+        retry once. See :meth:`_wl10_get_users` for the full rationale.
         """
         users = self._wl10_get_users()
         users_map = self._wl10_build_users_map(users)
@@ -968,6 +1151,7 @@ class ZK:
         # CMD_FREE_DATA + small pause before it will service the
         # next bulk command. Try them in sequence with retries.
         raw = b''
+        saw_ack = False
         for _ in range(3):
             try:  # noqa: SIM105  # keep exception visible for the loop's retry semantics
                 self.free_data()
@@ -977,6 +1161,38 @@ class ZK:
             if (raw and len(raw) >= 8
                     and self._wl10_bulk_is_complete(raw, const.WL10_ATT_RECORD_SIZE)):
                 break
+            if getattr(self, '_wl10_last_ack', None) is not None:
+                saw_ack = True
+
+        # MSS escalation (PMTUD blackhole recovery — see _wl10_get_users).
+        # A few clamped recovery cycles instead of one: on a flapping
+        # tunnel (observed on the Bella Vista VPN) a single attempt is a
+        # coin flip; each cycle is bounded by the clamp below.
+        if (not self._wl10_bulk_is_complete(raw, const.WL10_ATT_RECORD_SIZE)
+                and not saw_ack and self.tcp
+                and not getattr(self, 'tcp_maxseg', None)):
+            if self.verbose:
+                print('  [wl10_att] no terminal ACK seen across 3 attempts; '
+                      'reconnecting with MSS=1200 (PMTUD recovery)')
+            for _ in range(3):
+                try:
+                    self.tcp_maxseg = 1200
+                    self._wl10_reconnect()
+                    # Clamp (see _wl10_get_users): free_data + the buffered
+                    # drain block self.__timeout per call on a broken link.
+                    old_timeout = self.__timeout
+                    self.__timeout = min(self.__timeout, 5)
+                    try:
+                        self.free_data()
+                        raw = self._wl10_read_bulk_data(
+                            const.CMD_ATTLOG_RRQ, const.FCT_ATTLOG)
+                    finally:
+                        self.__timeout = old_timeout
+                    if self._wl10_bulk_is_complete(raw, const.WL10_ATT_RECORD_SIZE):
+                        break
+                except Exception as e:
+                    if self.verbose:
+                        print(f'  [wl10_att] MSS recovery failed: {e}')
 
         if not self._wl10_bulk_is_complete(raw, const.WL10_ATT_RECORD_SIZE):
             raise ZKErrorResponse(
