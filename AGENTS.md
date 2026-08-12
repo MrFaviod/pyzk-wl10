@@ -5,7 +5,7 @@
 Fork of `fananimi/pyzk` adding **ZK WL10 / AK3750** fingerprint attendance
 terminal support via a reverse-engineered TCP protocol. Tested against
 AK3750WIFI_TFT firmware "Ver 6.60 May 19 2023". Pure Python, stdlib-only
-runtime, ~4700 LOC. **Repository root**: `/home/informatica/zk2`.
+runtime, ~3700 LOC. **Repository root**: `/home/informatica/zk2`.
 
 ## Device Protocol Summary
 
@@ -33,19 +33,19 @@ Deletion **persists** on tested devices (192.168.120.80, 192.168.130.107).
 
 ```
 /home/informatica/zk2/
-├── listar_marcaciones.py          # CLI: dump attendance w/ --since/--csv
+├── listar_marcaciones.py          # CLI: dump attendance w/ --since/--until/--csv
 ├── wl10_probe_write.py            # One-off protocol probe (write+verify+delete)
-├── check_device.py                # Portable Windows diagnostic (UIDs > 999)
-├── test_wl10_write.py             # Live-device E2E (set_user/delete_user/reboot)
+├── check_device.py                # Portable Windows read-only diagnostic (users + attendance, ES labels)
+├── test_wl10_write.py             # Live-device E2E (set_user/delete_user)
 ├── test_runner_wl10.py            # Live-device runner (uid<=1000, user_id>=9999, no overwrite/delete)
 ├── README.md                      # Full protocol docs
 ├── AGENTS.md                      # This file
 └── pyzk_wl10/
     └── zk/
-        ├── base.py                # class ZK (2204 lines — the monolith)
+        ├── base.py                # class ZK (2441 lines — the monolith)
         ├── const.py               # Protocol constants (CMD_*, WL10_*_SIZE, WL10_VERIFY_*)
         ├── user.py / attendance.py / finger.py / exception.py
-        └── tests/                 # 91 offline tests (see pyzk_wl10/zk/tests/AGENTS.md)
+        └── tests/                 # 115 offline tests (see pyzk_wl10/zk/tests/AGENTS.md)
 ```
 
 ## Key API — `zk.base.ZK`
@@ -56,18 +56,18 @@ Deletion **persists** on tested devices (192.168.120.80, 192.168.130.107).
 - `gap_timeout` sets the per-attempt inter-chunk silence gap (base.py `_wl10_read_raw_command`); gaps grow 1×/2×/4× across the 3 drain attempts, clamped by `timeout`. Default `1` (LAN behavior preserved). `None` is normalized to `1` (CLIs pass `None` via argparse default — a raw `None` would break the `min(gap_timeout * 2**attempt, __timeout)` arithmetic)
 
 **General WL10 resilience mode** (applies to ALL wl10 devices, LAN + VPN — no per-IP config):
-- `_wl10_read_raw_command` (base.py L799+) drains until either (a) a **terminal ACK** is detected in the TCP stream (`_wl10_scan_for_terminal_ack`: framed packet, `dsize>=8`, `pcmd in (CMD_ACK_OK=2000, CMD_ACK_ERROR=2001)`) → ends drain early (LAN: same-tick ACK, faster than old 1s wait), or (b) adaptive silence fallback: per-attempt gap `min(gap_timeout * 2**attempt, __timeout)` (1s → 2s → 4s with defaults). `__reply_id` is synced from the ACK rid even on `CMD_ACK_ERROR`; `__session_id` is NEVER updated from bulk packets.
+- `_wl10_read_raw_command` (base.py L833+) drains until either (a) a **terminal ACK** is detected in the TCP stream (`_wl10_scan_for_terminal_ack`: framed packet, `dsize>=8`, `pcmd in (CMD_ACK_OK=2000, CMD_ACK_ERROR=2001)`) → ends drain early (LAN: same-tick ACK, faster than old 1s wait), or (b) adaptive silence fallback: per-attempt gap `min(gap_timeout * 2**attempt, __timeout)` (1s → 2s → 4s with defaults). `__reply_id` is synced from the ACK rid even on `CMD_ACK_ERROR`; `__session_id` is NEVER updated from bulk packets.
 - On 3 incomplete bulk attempts with **no terminal ACK observed** and `tcp_maxseg` unset, `_wl10_get_users`/`_wl10_get_attendance` auto-escalate: set `tcp_maxseg=1200`, `_wl10_reconnect()`, and retry up to **3 clamped recovery cycles** (each bounded by `min(__timeout, 5)`; break on a complete bulk). The multi-cycle loop handles flapping tunnels (observed ~50% up/down duty on the Bella Vista VPN) where a single recovery attempt is a coin flip. LAN devices complete attempt 1 (ACK arrives) → never reach escalation → zero behavior change.
-- `_wl10_reconnect()` (base.py L777) — private recovery: marks `is_connect=False`, temporarily sets `ommit_ping=True` (ICMP may be blocked even when TCP is recoverable), calls `connect()` for a fresh handshake (resets `__session_id`/`__reply_id`). Deliberately does NOT use `disconnect()` (that sends `CMD_EXIT` first and can fail on a broken VPN). `__create_socket` closes the old socket before creating the replacement (fd-leak fix).
+- `_wl10_reconnect()` (base.py L801) — private recovery: marks `is_connect=False`, temporarily sets `ommit_ping=True` (ICMP may be blocked even when TCP is recoverable), calls `connect()` for a fresh handshake (resets `__session_id`/`__reply_id`). Deliberately does NOT use `disconnect()` (that sends `CMD_EXIT` first and can fail on a broken VPN). `__create_socket` closes the old socket before creating the replacement (fd-leak fix).
 
 **Public WL10 API** (line refs in `pyzk_wl10/zk/base.py`):
-- `wl10_get_users()` L1177 → `list[User]`
-- `wl10_get_attendance()` L1185 → `list[Attendance]`
-- `wl10_set_user(uid=None, name='', privilege=0, password='', group_id='', user_id='', card=0, verify_mode=1)` L1257 → `bool`
-- `wl10_delete_user(uid=0, user_id='')` L1351 → `bool`
-- `wl10_reboot()` L1402 → `bool` — marks connection closed on success
+- `wl10_get_users()` L1414 → `list[User]`
+- `wl10_get_attendance()` L1422 → `list[Attendance]`
+- `wl10_set_user(uid=None, name='', privilege=0, password='', group_id='', user_id='', card=0, verify_mode=1)` L1494 → `bool`
+- `wl10_delete_user(uid=0, user_id='')` L1588 → `bool`
+- `wl10_reboot()` L1639 → `bool` — marks connection closed on success
 
-**Internal helpers** (`pyzk_wl10/zk/base.py`): `_wl10_read_sizes` L564, `_wl10_scan_for_terminal_ack` L733, `_wl10_reconnect` L777, `_wl10_read_raw_command` L799 (ACK-terminated drain + adaptive silence fallback; syncs `__reply_id` from terminal ACK; does NOT sync `__session_id`), `_wl10_parse_users` L1001, `_wl10_parse_attendance` L1112, `_wl10_read_ack` L1193 (syncs `__reply_id`), `_wl10_refresh_data` L1234.
+**Internal helpers** (`pyzk_wl10/zk/base.py`): `_wl10_get_users` L1081, `_wl10_get_attendance` L1156, `_wl10_parse_users` L1238, `_wl10_parse_attendance` L1349, `_wl10_read_sizes` L597, `_wl10_scan_for_terminal_ack` L758, `_wl10_reconnect` L801, `_wl10_read_raw_command` L833 (ACK-terminated drain + adaptive silence fallback; syncs `__reply_id` from terminal ACK; does NOT sync `__session_id`), `_wl10_read_ack` L1430 (syncs `__reply_id`), `_wl10_refresh_data` L1471.
 
 ## Usage
 
@@ -89,7 +89,7 @@ zk.disconnect()
 ## Test Suite
 
 ```bash
-python3 -m pytest pyzk_wl10/zk/tests/ -q     # 91 passed
+python3 -m pytest pyzk_wl10/zk/tests/ -q     # 115 passed
 ```
 
 **HAZARD**: a bare `pytest` from the repo root collects the live-device
@@ -102,7 +102,7 @@ always run with the explicit `pyzk_wl10/zk/tests/` path. Test conventions:
 All take a device IP and touch real hardware. Never run casually or in CI:
 - `listar_marcaciones.py IP [--since ... --csv --tcp-maxseg N --gap-timeout N]` — dump attendance (VPN-tuned flags)
 - `wl10_probe_write.py IP --verbose` — writes/deletes real users
-- `check_device.py` — Windows diagnostic, UIDs > 999
+- `check_device.py` — Windows read-only diagnostic (users + attendance, ES labels)
 - `test_wl10_write.py IP --verbose` — live E2E (excluded from ruff)
 - `test_runner_wl10.py IP1 IP2 --verbose` — writes 2 test users, NO delete
 
@@ -118,8 +118,9 @@ All take a device IP and touch real hardware. Never run casually or in CI:
 ## Commands
 
 ```bash
-python3 -m pytest pyzk_wl10/zk/tests/ -q                          # offline suite (106)
+python3 -m pytest pyzk_wl10/zk/tests/ -q                          # offline suite (115)
 python3 -m pytest pyzk_wl10/zk/tests/test_set_user.py -v          # single file
+ruff check .                                                      # lint (config: pyproject.toml)
 python3 listar_marcaciones.py 192.168.180.201 --since 2026-07-01 --csv
 python3 listar_marcaciones.py 192.168.110.152 --since 2026-07-01 --tcp-maxseg 1200 --gap-timeout 3   # VPN path (manual overrides; resilience auto-applies without flags)
 ```
