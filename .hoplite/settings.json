@@ -4,7 +4,7 @@
   "scripts": {
     "setup": {
       "enabled": true,
-      "command": "python3 -m pip install --quiet --break-system-packages pytest ruff"
+      "command": "apt-get update -qq && apt-get install -y -qq --no-install-recommends git-lfs && python3 -m pip install --quiet --break-system-packages pytest ruff"
     },
     "run": {"enabled": true, "command": null},
     "archive": {"enabled": true, "command": null},
