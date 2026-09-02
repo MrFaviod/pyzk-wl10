@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "ports": {"preview": 3000, "additional": {}},
+  "scripts": {
+    "setup": {
+      "enabled": true,
+      "command": "python3 -m pip install --quiet --break-system-packages pytest ruff"
+    },
+    "run": {"enabled": true, "command": null},
+    "archive": {"enabled": true, "command": null},
+    "check": {"enabled": true, "command": null}
+  },
+  "mcpServers": []
+}
