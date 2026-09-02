@@ -45,7 +45,7 @@ Deletion **persists** on tested devices (192.168.120.80, 192.168.130.107).
         ├── base.py                # class ZK (2441 lines — the monolith)
         ├── const.py               # Protocol constants (CMD_*, WL10_*_SIZE, WL10_VERIFY_*)
         ├── user.py / attendance.py / finger.py / exception.py
-        └── tests/                 # 115 offline tests (see pyzk_wl10/zk/tests/AGENTS.md)
+        └── tests/                 # 122 offline tests (see pyzk_wl10/zk/tests/AGENTS.md)
 ```
 
 ## Key API — `zk.base.ZK`
@@ -89,7 +89,7 @@ zk.disconnect()
 ## Test Suite
 
 ```bash
-python3 -m pytest pyzk_wl10/zk/tests/ -q     # 115 passed
+python3 -m pytest pyzk_wl10/zk/tests/ -q     # 122 passed
 ```
 
 **HAZARD**: a bare `pytest` from the repo root collects the live-device
@@ -118,7 +118,7 @@ All take a device IP and touch real hardware. Never run casually or in CI:
 ## Commands
 
 ```bash
-python3 -m pytest pyzk_wl10/zk/tests/ -q                          # offline suite (115)
+python3 -m pytest pyzk_wl10/zk/tests/ -q                          # offline suite (122)
 python3 -m pytest pyzk_wl10/zk/tests/test_set_user.py -v          # single file
 ruff check .                                                      # lint (config: pyproject.toml)
 python3 listar_marcaciones.py 192.168.180.201 --since 2026-07-01 --csv

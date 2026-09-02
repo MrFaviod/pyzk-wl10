@@ -171,7 +171,7 @@ $ python3 listar_marcaciones.py 192.168.180.201 --since 2026-07-01
 │       ├── exception.py
 │       ├── finger.py
 │       ├── user.py
-│       └── tests/          # 49 pytest tests
+│       └── tests/          # 122 pytest tests
 │           ├── conftest.py
 │           ├── helpers.py
 │           └── test_*.py

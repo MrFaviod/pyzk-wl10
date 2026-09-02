@@ -41,6 +41,17 @@ def status_display(att):
     return str(att.status)
 
 
+def positive_int(value):
+    """argparse type: strictly positive integer (rejects 0/negative --limit)."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f'valor invalido: {value!r}')
+    if n <= 0:
+        raise argparse.ArgumentTypeError(f'{value!r} debe ser un entero positivo')
+    return n
+
+
 def main():  # noqa: PLR0912, PLR0915  # intentional: diagnostic CLI with many branches/steps
     # Consola Windows: acepta caracteres UTF-8 (nombres con acentos)
     with suppress(AttributeError, ValueError):
@@ -51,7 +62,7 @@ def main():  # noqa: PLR0912, PLR0915  # intentional: diagnostic CLI with many b
     ap.add_argument('--port', type=int, default=4370)
     ap.add_argument('--timeout', type=int, default=20, help='Timeout de conexion en segundos')
     ap.add_argument('--password', type=int, default=0, help='Contrasena del dispositivo')
-    ap.add_argument('--limit', type=int, default=20, help='Cuantas ultimas marcaciones mostrar')
+    ap.add_argument('--limit', type=positive_int, default=20, help='Cuantas ultimas marcaciones mostrar')
     ap.add_argument('--no-wl10', action='store_true', help='Forzar modo estandar (no WL10)')
     ap.add_argument('--csv', metavar='ARCHIVO', help='Guardar TODAS las marcaciones en CSV')
     args = ap.parse_args()
