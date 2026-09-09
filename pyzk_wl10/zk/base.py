@@ -640,6 +640,8 @@ class ZK:
         )
 
     def restart(self):
+        if self.wl10:
+            return self.wl10_reboot()
         command = const.CMD_RESTART
         cmd_response = self.__send_command(command)
         if cmd_response.get('status'):
@@ -1876,8 +1878,7 @@ class ZK:
 
     def get_users(self):
         if self.wl10:
-            users = self._wl10_get_users()
-            return users
+            return self.wl10_get_users()
         self.read_sizes()
         if self.users == 0:
             self.next_uid = 1

@@ -9,6 +9,7 @@ from struct import pack
 from unittest.mock import MagicMock
 
 from zk import const
+from zk.user import User
 
 
 class TestNativeDispatchToWl10:
@@ -35,6 +36,32 @@ class TestNativeDispatchToWl10:
         result = zk_instance.delete_user(uid=100)
         zk_instance.wl10_delete_user.assert_called_once_with(
             uid=100, user_id='')
+        assert result is True
+
+    def test_get_users_dispatches_to_wl10(self, zk_instance):
+        users = [User(5, 'Alice', 0, '', '1', '259', 0),
+                 User(6, 'Bob', 0, '', '1', '260', 0)]
+        zk_instance._wl10_get_users = MagicMock(return_value=users)
+        zk_instance.wl10_get_users = MagicMock(
+            side_effect=zk_instance.wl10_get_users)
+        zk_instance._ZK__send_command = MagicMock()
+        zk_instance.users = 0
+        zk_instance.next_uid = 1
+        zk_instance.next_user_id = '1'
+        result = zk_instance.get_users()
+        zk_instance.wl10_get_users.assert_called_once_with()
+        zk_instance._ZK__send_command.assert_not_called()
+        assert result == users
+        assert zk_instance.users == 2
+        assert zk_instance.next_uid == 7
+        assert zk_instance.next_user_id == '7'
+
+    def test_restart_dispatches_to_wl10(self, zk_instance):
+        zk_instance.wl10_reboot = MagicMock(return_value=True)
+        zk_instance._ZK__send_command = MagicMock()
+        result = zk_instance.restart()
+        zk_instance.wl10_reboot.assert_called_once_with()
+        zk_instance._ZK__send_command.assert_not_called()
         assert result is True
 
 

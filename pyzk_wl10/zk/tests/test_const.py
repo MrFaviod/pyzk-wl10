@@ -30,3 +30,4 @@ class TestConst:
         assert hasattr(inst, 'wl10_get_attendance')
         assert hasattr(inst, 'wl10_set_user')
         assert hasattr(inst, 'wl10_delete_user')
+        assert hasattr(inst, 'wl10_reboot')
