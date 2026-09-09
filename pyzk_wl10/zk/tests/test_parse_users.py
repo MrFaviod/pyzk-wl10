@@ -65,3 +65,26 @@ class TestParseUsers:
 
     def test_parse_users_empty(self, zk_instance):
         assert zk_instance._wl10_parse_users(b'') == []
+
+    def test_decode_template_slot_returns_none(self, zk_instance):
+        # Fingerprint-template slots are interleaved in the user table with
+        # privilege byte 0x31 (49). They must never be parsed as users.
+        rec = pack_user_record(uid=3, privilege=0x31)
+        assert zk_instance._wl10_decode_user_record(rec) is None
+
+    def test_parse_users_skips_template_slots(self, zk_instance):
+        real = pack_user_record(uid=5, name=b'Alice', user_id=b'100')
+        slot = pack_user_record(uid=3, privilege=0x31)
+        raw = pack_bulk_response(real + slot, WL10_USER_RECORD_SIZE)
+        users = zk_instance._wl10_parse_users(raw)
+        assert [u.uid for u in users] == [5]
+
+    def test_decode_alphanumeric_badge_preserved(self, zk_instance):
+        # A user with an alphanumeric badge (user_id='AB12') and a name that
+        # contains digits ('Juan 123') must keep the badge as-is. The scan
+        # fallback must NOT kick in just because user_id is non-numeric.
+        rec = pack_user_record(
+            uid=10, name=b'Juan 123', user_id=b'AB12')
+        user = zk_instance._wl10_decode_user_record(rec)
+        assert user is not None
+        assert user.user_id == 'AB12'

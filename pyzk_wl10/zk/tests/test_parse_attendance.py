@@ -95,3 +95,32 @@ class TestParseAttendance:
             assert a.status_label == expected, (
                 f'status {status} should map to {expected!r}, got {a.status_label!r}'
             )
+
+    def test_parse_skips_uid_zero_record(self, zk_instance):
+        """Attendance with uid=0 is an orphan of a deleted user."""
+        ts = encode_zk_time(datetime(2026, 7, 1, 14, 5, 38))
+        rec = pack_attendance_record(
+            uid=0, user_id=b'138', flag=1, timestamp=ts, status=0)
+        raw = pack_bulk_response(rec, WL10_ATT_RECORD_SIZE)
+        atts = zk_instance._wl10_parse_attendance(raw)
+        assert len(atts) == 0, 'uid=0 (orphan) record must be skipped'
+
+    def test_parse_keeps_records_with_distinct_flags(self, zk_instance):
+        """Punches identical except for the flag byte must both survive."""
+        ts = encode_zk_time(datetime(2026, 7, 1, 14, 5, 38))
+        rec_a = pack_attendance_record(
+            uid=138, user_id=b'138', flag=1, timestamp=ts, status=0)
+        rec_b = pack_attendance_record(
+            uid=138, user_id=b'138', flag=0, timestamp=ts, status=0)
+        raw = pack_bulk_response(rec_a + rec_b, WL10_ATT_RECORD_SIZE)
+        atts = zk_instance._wl10_parse_attendance(raw)
+        assert len(atts) == 2, 'distinct flag bytes must not be deduped'
+
+    def test_parse_dedups_byte_identical_records(self, zk_instance):
+        """Byte-identical duplicate punches still collapse to one."""
+        ts = encode_zk_time(datetime(2026, 7, 1, 14, 5, 38))
+        rec = pack_attendance_record(
+            uid=138, user_id=b'138', flag=1, timestamp=ts, status=0)
+        raw = pack_bulk_response(rec + rec, WL10_ATT_RECORD_SIZE)
+        atts = zk_instance._wl10_parse_attendance(raw)
+        assert len(atts) == 1, 'byte-identical records must still dedupe'

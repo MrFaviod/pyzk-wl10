@@ -228,3 +228,66 @@ class TestWl10DeleteUser:
         payload = _first_send_payload(inst._ZK__sock)
         assert len(payload) == 2
         assert unpack('<H', payload)[0] == 42
+
+
+class TestWl10SetUserValidation:
+    """Range validation must reject invalid uid/card before any socket I/O."""
+
+    @pytest.mark.parametrize('uid', [0, 1001, 70000])
+    def test_invalid_uid_raises_before_socket(self, uid):
+        inst = _build_wl10_zk()
+        with pytest.raises(ZKErrorResponse, match='uid'):
+            inst.wl10_set_user(uid=uid, user_id='999950')
+        assert inst._ZK__sock.send.call_count == 0
+
+    def test_card_out_of_range_raises_before_socket(self):
+        inst = _build_wl10_zk()
+        with pytest.raises(ZKErrorResponse, match='card'):
+            inst.wl10_set_user(uid=10, user_id='999950', card=2 ** 40)
+        assert inst._ZK__sock.send.call_count == 0
+
+    def test_boundary_values_accepted(self):
+        inst = _build_wl10_zk()
+        result = inst.wl10_set_user(
+            uid=1000, user_id='999950', card=0xFFFFFFFF)
+        assert result is True
+        assert inst._ZK__sock.send.call_count >= 1
+
+
+class TestWl10SetUserNameTruncation:
+    """The 24-byte name field must never cut a multibyte char in half."""
+
+    def test_multibyte_name_truncates_at_char_boundary(self):
+        inst = _build_wl10_zk()
+        # 23 ASCII + 1 two-byte 'é' = 25 bytes > 24. The device field is
+        # 24 bytes, so 'é' must be dropped whole, not cut mid-sequence.
+        inst.wl10_set_user(uid=1, name='A' * 23 + 'é', user_id='999950')
+        payload = _first_send_payload(inst._ZK__sock)
+        name_field = payload[11:35]
+        decoded = name_field.split(b'\x00', 1)[0].decode('UTF-8')
+        assert decoded == 'A' * 23
+
+    def test_short_multibyte_name_roundtrips(self):
+        inst = _build_wl10_zk()
+        inst.wl10_set_user(uid=1, name='José', user_id='999950')
+        payload = _first_send_payload(inst._ZK__sock)
+        name_field = payload[11:35]
+        decoded = name_field.split(b'\x00', 1)[0].decode('UTF-8')
+        assert decoded == 'José'
+
+
+class TestWl10SetUserBadgeRequirement:
+    """A badge (user_id) must be explicit — never derived silently from uid."""
+
+    def test_missing_badge_raises_before_socket(self):
+        inst = _build_wl10_zk()
+        with pytest.raises(ZKErrorResponse, match='user_id'):
+            inst.wl10_set_user(uid=1)
+        assert inst._ZK__sock.send.call_count == 0
+
+    def test_auto_uid_with_explicit_badge_ok(self):
+        inst = _build_wl10_zk()
+        # uid=None still auto-assigns from next_uid (safe after BUG-2),
+        # but the badge must be provided explicitly.
+        result = inst.wl10_set_user(uid=None, user_id='999950')
+        assert result is True

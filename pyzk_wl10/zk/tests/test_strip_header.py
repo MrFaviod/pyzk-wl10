@@ -63,3 +63,29 @@ class TestStripHeader:
         recs, n = zk_class._wl10_strip_header(data, 72)
         assert n == 3, f'Expected 3 records, got {n}'
         assert len(recs) == 3 * 72
+
+
+class TestCreateHeaderReplyId:
+    """Lock the reply_id wrap semantics used by ``connect()``.
+
+    ``connect()`` seeds ``self.__reply_id = const.USHRT_MAX - 1`` (65534)
+    before the first ``CMD_CONNECT``. The header must NEVER emit 0xFFFF
+    (65535) — the device firmware treats it as a reserved/invalid value and
+    the handshake fails (observed: ``get_device_name()`` times out). The
+    wrap therefore triggers AT 65535, mapping the post-increment 65535 to 0
+    and keeping the field within 0..65534.
+    """
+
+    def _reply_id(self, zk_class, reply_id):
+        zk = object.__new__(zk_class)
+        header = zk._ZK__create_header(1000, b'', 1, reply_id)
+        # buf = pack('<4H', command, checksum, session_id, reply_id)
+        # command_string is b'' so header == buf and reply_id is at [6:8].
+        return struct.unpack('<H', header[6:8])[0]
+
+    def test_reply_id_never_emits_reserved_ffff(self, zk_class):
+        # 65534 + 1 = 65535 (0xFFFF) must wrap to 0, never be emitted.
+        assert self._reply_id(zk_class, 65534) == 0
+
+    def test_reply_id_increments_without_wrap(self, zk_class):
+        assert self._reply_id(zk_class, 65533) == 65534

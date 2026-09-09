@@ -679,6 +679,8 @@ class ZK:
             raise ZKErrorResponse("can't poweroff")
 
     def refresh_data(self):
+        if self.wl10:
+            return self._wl10_refresh_data()
         command = const.CMD_REFRESHDATA
         cmd_response = self.__send_command(command)
         if cmd_response.get('status'):
@@ -1294,6 +1296,10 @@ class ZK:
         """
         uid = unpack('<H', rec[0:2])[0]
         privilege = rec[2]
+        if privilege == 0x31:
+            # Fingerprint-template slot (priv=0x31) interleaved in the
+            # user table — never a real user record.
+            return None
         password = rec[3:11].split(b'\x00', 1)[0].decode(self.encoding, errors='ignore')
         name = rec[11:35].split(b'\x00', 1)[0].decode(self.encoding, errors='ignore').strip()
         card = unpack('<I', rec[35:39])[0]
@@ -1305,8 +1311,10 @@ class ZK:
         # standard user_id field at bytes 48-71 holds garbage. Scan
         # the whole record for a 3-5 digit numeric user_id that
         # appears in one of the secondary offsets used by linking
-        # records.
-        if not name or (user_id and not user_id.isdigit()):
+        # records. Only trigger on a missing name — an alphanumeric
+        # (non-numeric) badge is legitimate and must be preserved, not
+        # overwritten by a digit run found elsewhere in the record.
+        if not name:
             fallback = self._wl10_scan_user_id(rec)
             if fallback:
                 user_id = fallback
@@ -1369,6 +1377,10 @@ class ZK:
         for i in range(n):
             rec = records[i * rec_size:(i + 1) * rec_size]
             uid = unpack('<H', rec[0:2])[0]
+            if uid == 0:
+                # uid=0 marks a punch whose user was deleted from the
+                # device — an orphan record, not a valid attendance.
+                continue
             user_id_raw = rec[2:8].split(b'\x00', 1)[0].decode('ascii', errors='ignore')
             ts = unpack('<I', rec[13:17])[0]
             status = rec[17]
@@ -1383,7 +1395,7 @@ class ZK:
             # Some WL10 firmwares (e.g. Bella Vista vpn-device) emit every
             # attendance record twice. Collapse identical punches while
             # keeping distinct ones (different status/time is NOT a dup).
-            key = (user_id_raw, ts, status)
+            key = (user_id_raw, ts, status, rec[12])
             if key in seen:
                 continue
             seen.add(key)
@@ -1417,6 +1429,13 @@ class ZK:
             raise ZKErrorResponse('Not in WL10 mode. Call with wl10=True')
         users = self._wl10_get_users()
         self.users = len(users)
+        max_uid = max((u.uid for u in users), default=0)
+        max_uid += 1
+        self.next_uid = max_uid
+        self.next_user_id = str(max_uid)
+        while any(u.user_id == self.next_user_id for u in users):
+            max_uid += 1
+            self.next_user_id = str(max_uid)
         return users
 
     def wl10_get_attendance(self):
@@ -1523,10 +1542,13 @@ class ZK:
 
         if uid is None:
             uid = self.next_uid
-            if not user_id:
-                user_id = self.next_user_id
         if not user_id:
-            user_id = str(uid)
+            # RISK-2: never derive a badge silently from uid. Real badges
+            # (e.g. existing-badge-range) overlap the low uid range, so auto-assigning
+            # user_id=str(uid) collides with existing badges on the device.
+            raise ZKErrorResponse(
+                'user_id (badge) is required; auto-assigning a badge from '
+                'uid was removed to prevent collisions with real badges')
         if privilege not in (const.USER_DEFAULT, const.USER_ADMIN):
             privilege = const.USER_DEFAULT
         privilege = int(privilege)
@@ -1534,7 +1556,25 @@ class ZK:
             verify_mode = const.WL10_VERIFY_DEFAULT
         verify_mode = int(verify_mode)
 
-        name_pad = name.encode(self.encoding, errors='ignore').ljust(24, b'\x00')[:24]
+        if not 1 <= uid <= 1000:
+            raise ZKErrorResponse(f'uid out of range (1..1000): {uid}')
+        if not 0 <= int(card) <= 0xFFFFFFFF:
+            raise ZKErrorResponse(f'card out of range (0..0xFFFFFFFF): {card}')
+
+        name_raw = name.encode(self.encoding, errors='ignore')
+        if len(name_raw) > 24:
+            # The 24-byte name field must never split a multibyte
+            # character mid-sequence (that yields mojibake on the
+            # device). Walk back to a valid character boundary.
+            truncated = name_raw[:24]
+            while truncated:
+                try:
+                    truncated.decode(self.encoding)
+                    break
+                except UnicodeDecodeError:
+                    truncated = truncated[:-1]
+            name_raw = truncated
+        name_pad = name_raw.ljust(24, b'\x00')
         card_str = pack('<I', int(card))[:4]
         command_string = pack('HB8s24s4sB7sx24s',
                              uid, privilege,
@@ -1685,6 +1725,10 @@ class ZK:
     # ================== End WL10 Specific Methods ==================
 
     def set_user(self, uid=None, name='', privilege=0, password='', group_id='', user_id='', card=0):
+        if self.wl10:
+            return self.wl10_set_user(uid=uid, name=name, privilege=privilege,
+                                      password=password, group_id=group_id,
+                                      user_id=user_id, card=card)
         command = const.CMD_USER_WRQ
         if uid is None:
             uid = self.next_uid
@@ -1802,6 +1846,8 @@ class ZK:
         return bool(cmd_response.get('status'))
 
     def delete_user(self, uid=0, user_id=''):
+        if self.wl10:
+            return self.wl10_delete_user(uid=uid, user_id=user_id)
         if not uid:
             users = self.get_users()
             users = list(filter(lambda x: x.user_id == str(user_id), users))
@@ -1809,7 +1855,7 @@ class ZK:
                 return False
             uid = users[0].uid
         command = const.CMD_DELETE_USER
-        command_string = pack('h', uid)
+        command_string = pack('<H', uid)
         cmd_response = self.__send_command(command, command_string)
         if not cmd_response.get('status'):
             raise ZKErrorResponse("Can't delete user")

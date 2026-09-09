@@ -366,3 +366,36 @@ class TestConnectHandshakeRetry:
             inst.connect()
 
         assert inst._ZK__send_command.call_count == 3
+
+
+class TestWl10GetUsersSyncNextUid:
+    """wl10_get_users must advance next_uid/next_user_id (BUG-2)."""
+
+    def test_syncs_next_uid_from_max(self):
+        inst = _build_wl10_zk()
+        users = [User(5, 'Alice', 0, '', '1', '259', 0),
+                 User(6, 'Bob', 0, '', '1', '260', 0)]
+        inst._wl10_get_users = MagicMock(return_value=users)
+        result = inst.wl10_get_users()
+        assert result == users
+        assert inst.next_uid == 7
+        assert inst.next_user_id == '7'
+
+    def test_bumps_past_badge_collision(self):
+        inst = _build_wl10_zk()
+        # user_id '7' already taken by an existing user -> next_user_id '8'
+        users = [User(5, 'Alice', 0, '', '1', '259', 0),
+                 User(6, 'Bob', 0, '', '1', '7', 0)]
+        inst._wl10_get_users = MagicMock(return_value=users)
+        inst.wl10_get_users()
+        assert inst.next_uid == 7
+        assert inst.next_user_id == '8'
+
+    def test_empty_table_resets_to_one(self):
+        inst = _build_wl10_zk()
+        inst.next_uid = 99
+        inst.next_user_id = '99'
+        inst._wl10_get_users = MagicMock(return_value=[])
+        inst.wl10_get_users()
+        assert inst.next_uid == 1
+        assert inst.next_user_id == '1'

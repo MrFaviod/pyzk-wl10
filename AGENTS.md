@@ -7,6 +7,12 @@ terminal support via a reverse-engineered TCP protocol. Tested against
 AK3750WIFI_TFT firmware "Ver 6.60 May 19 2023". Pure Python, stdlib-only
 runtime, ~3700 LOC. **Repository root**: `/home/informatica/zk2`.
 
+**Before touching `base.py`'s WL10 read/write paths, read
+`specs/wl10_reengineering_review.md`** — an adversarial review of this
+library documenting 6 unfixed bugs (3 CRITICAL), their root causes, and
+proposed fixes with tests. The "Known Limitations" section below condenses
+the operational ones.
+
 ## Device Protocol Summary
 
 ### Read Path (pre-existing in fork)
@@ -40,6 +46,8 @@ Deletion **persists** on tested devices (<DEVICE_IP>, <DEVICE_IP>).
 ├── test_runner_wl10.py            # Live-device runner (uid<=1000, user_id>=9999, no overwrite/delete)
 ├── README.md                      # Full protocol docs
 ├── AGENTS.md                      # This file
+├── specs/
+│   └── wl10_reengineering_review.md  # Adversarial review: 6 unfixed bugs (3 CRITICAL) + fixes/tests
 └── pyzk_wl10/
     └── zk/
         ├── base.py                # class ZK (2441 lines — the monolith)
@@ -114,13 +122,22 @@ All take a device IP and touch real hardware. Never run casually or in CI:
 4. **No fingerprint/template write support** — basic user records only.
 5. **Badge/user_id limited to 6 chars** (max 999999, 24B ASCII field).
 6. **`_wl10_read_sizes()` returns False** on this firmware — capacities not queryable.
+7. **WL10 reengineering fixes applied** — all bugs from `specs/wl10_reengineering_review.md` are fixed (139 offline tests, up from 115):
+   - Template/linking slots (`priv=0x31` = 49) are excluded from `wl10_get_users()` — no more `NN-<scan>` fake users (review BUG-1).
+   - `wl10_get_users()` syncs `next_uid`/`next_user_id` — auto-assigned uid is no longer stale (review BUG-5).
+   - `wl10_set_user()` validates uid (1..1000) and card range before any socket write (review BUG-2).
+   - Alphanumeric badges preserved (review BUG-1); multibyte names truncate at a char boundary (review BUG-3).
+   - Native `set_user`/`delete_user`/`refresh_data` dispatch to `wl10_*` in WL10 mode.
+   - `wl10_set_user()` requires an explicit badge (`user_id`) — auto-assigning from uid was removed to prevent collisions.
+   - Attendance `uid=0` (deleted user) is skipped (review BUG-6); dedup key includes the flag byte.
+   - **M4 [data-model limitation, not a bug]**: a record the device stores with no name but a valid uid shows as `NN-<uid>` — the device holds only a fingerprint template, no name to display.
 
 ## Commands
 
 ```bash
-python3 -m pytest pyzk_wl10/zk/tests/ -q                          # offline suite (115)
+python3 -m pytest pyzk_wl10/zk/tests/ -q                          # offline suite (139) — the verification gate
 python3 -m pytest pyzk_wl10/zk/tests/test_set_user.py -v          # single file
-ruff check .                                                      # lint (config: pyproject.toml)
+ruff check .                                                      # lint (config: pyproject.toml; ruff not installed in this env — pytest is the gate)
 python3 listar_marcaciones.py <DEVICE_IP> --since 2026-07-01 --csv
 python3 listar_marcaciones.py <DEVICE_IP> --since 2026-07-01 --tcp-maxseg 1200 --gap-timeout 3   # VPN path (manual overrides; resilience auto-applies without flags)
 ```
@@ -134,4 +151,5 @@ python3 listar_marcaciones.py <DEVICE_IP> --since 2026-07-01 --tcp-maxseg 1200 -
 5. **Privilege**: `0 = USER_DEFAULT`, `14 = USER_ADMIN`; anything else clamps to `0`. `verify_mode` must be in `WL10_VERIFY_MODES` (default 1 = fingerprint) or it clamps.
 6. **`refresh_data()` required** between bulk operations to settle device state.
 7. **`__session_id` is NOT updated** by `_wl10_read_raw_command` — bulk `CMD_DATA` packets have garbled sid bytes 4-7; updating from them corrupts the session.
-8. **Inter-chunk drain gap = `min(gap_timeout * 2**attempt, self.__timeout)`** (base.py `_wl10_read_raw_command`) — grows 1×/2×/4× across the 3 drain attempts (VPN path tolerates jitter); LAN devices end on the terminal ACK in the same tick, so the gap is never exercised. `setsockopt(TCP_MAXSEG)` is wrapped in `try/except OSError` (Windows: option unsupported, bpo-23302).
+8. **Never call `wl10_set_user(uid=None)`** — `next_uid` stays stale (`wl10_get_users()` never updates it), so the auto-assigned uid is 1: it silently **overwrites the Admin**. Always pass an explicit uid, and keep it ≤ 1000 (see specs doc BUG-5).
+9. **Inter-chunk drain gap = `min(gap_timeout * 2**attempt, self.__timeout)`** (base.py `_wl10_read_raw_command`) — grows 1×/2×/4× across the 3 drain attempts (VPN path tolerates jitter); LAN devices end on the terminal ACK in the same tick, so the gap is never exercised. `setsockopt(TCP_MAXSEG)` is wrapped in `try/except OSError` (Windows: option unsupported, bpo-23302).
