@@ -34,6 +34,13 @@ def _build_wl10_zk(ack_cmd=const.CMD_ACK_OK, ack_rid=100):
     inst._wl10_refresh_data = MagicMock(side_effect=lambda: (
         inst._events.append('refresh') or True))
     return inst
+def _build_raw_transport_zk(ack_cmd=const.CMD_ACK_OK):
+    inst = _build_wl10_zk(ack_cmd=ack_cmd)
+    inst._events = []
+    inst._ZK__sock.send.side_effect = lambda frame: inst._events.append(
+        unpack('<H', frame[8:10])[0])
+    inst._wl10_refresh_data = ZK._wl10_refresh_data.__get__(inst, ZK)
+    return inst
 
 
 def _first_send_frame(sock):
@@ -120,4 +127,10 @@ class TestWl10RebootResponse:
                          for call in inst._ZK__sock.send.call_args_list]
         assert sent_commands.count(const.CMD_RESTART) == 1
         assert inst._events == ['refresh']
+
+    def test_raw_refresh_precedes_restart(self):
+        inst = _build_raw_transport_zk()
+        inst.wl10_reboot()
+        assert inst._events[:2] == [const.CMD_REFRESHDATA, const.CMD_RESTART]
+        assert inst._events.count(const.CMD_RESTART) == 1
         assert inst.is_connect is False

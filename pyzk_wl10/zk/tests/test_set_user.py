@@ -46,6 +46,31 @@ def _build_wl10_zk(ack_cmd=const.CMD_ACK_OK, ack_rid=100):
         inst._events.append('refresh') or True))
     inst.refresh_data = MagicMock(return_value=True)
     return inst
+def _build_wl10_transport_zk(ack_commands=None):
+    """Build a fake transport that records real raw command frames."""
+    inst = object.__new__(ZK)
+    inst.wl10 = True
+    inst.verbose = False
+    inst.encoding = 'UTF-8'
+    inst.tcp = True
+    inst.is_connect = True
+    inst._ZK__session_id = 12345
+    inst._ZK__reply_id = 6789
+    inst._ZK__timeout = 5
+    inst.next_uid = 1
+    inst.next_user_id = '1'
+    inst._wl10_template_uids = set()
+    inst._events = []
+    inst._users = [User(1, 'Alice', USER_DEFAULT, user_id='999950', card=0)]
+    inst._ZK__sock = MagicMock()
+    inst._ZK__sock.send.side_effect = lambda frame: inst._events.append(
+        unpack('<H', frame[8:10])[0])
+    acks = iter(ack_commands or [const.CMD_ACK_OK] * 3)
+    inst._wl10_read_ack = MagicMock(
+        side_effect=lambda: (next(acks), 7000 + len(inst._events)))
+    inst._wl10_get_users = MagicMock(side_effect=lambda: (
+        inst._events.append('read') or inst._users))
+    return inst
 
 
 def _command_codes(sock):
@@ -409,3 +434,27 @@ class TestWl10MutationSafety:
         with pytest.raises(ZKErrorResponse, match='delete outcome is unknown'):
             inst.wl10_delete_user(uid=42)
         assert _command_codes(inst._ZK__sock).count(const.CMD_DELETE_USER) == 1
+
+
+class TestWl10RawCommandOrdering:
+    def test_set_emits_preflight_refresh_then_one_write(self):
+        inst = _build_wl10_transport_zk()
+        assert inst.wl10_set_user(uid=3, name='Alice', user_id='999950') is True
+        assert inst._events[:3] == [
+            'read', const.CMD_REFRESHDATA, const.CMD_USER_WRQ]
+        assert inst._events.count(const.CMD_USER_WRQ) == 1
+
+    def test_delete_emits_preflight_refresh_then_one_delete(self):
+        inst = _build_wl10_transport_zk()
+        inst._users = [User(42, 'Forty Two', USER_DEFAULT, user_id='999942')]
+        assert inst.wl10_delete_user(uid=42) is True
+        assert inst._events[:3] == [
+            'read', const.CMD_REFRESHDATA, const.CMD_DELETE_USER]
+        assert inst._events.count(const.CMD_DELETE_USER) == 1
+
+    def test_rejected_set_emits_no_refresh_or_write(self):
+        inst = _build_wl10_transport_zk()
+        inst._wl10_template_uids = {3}
+        with pytest.raises(ZKErrorResponse, match='reserved'):
+            inst.wl10_set_user(uid=3, user_id='999950')
+        assert inst._events == ['read']
