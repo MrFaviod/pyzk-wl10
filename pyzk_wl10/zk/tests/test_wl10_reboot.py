@@ -30,6 +30,9 @@ def _build_wl10_zk(ack_cmd=const.CMD_ACK_OK, ack_rid=100):
     inst.next_user_id = '1'
     inst._ZK__sock = MagicMock()
     inst._wl10_read_ack = MagicMock(return_value=(ack_cmd, ack_rid))
+    inst._events = []
+    inst._wl10_refresh_data = MagicMock(side_effect=lambda: (
+        inst._events.append('refresh') or True))
     return inst
 
 
@@ -98,3 +101,23 @@ class TestWl10RebootResponse:
         inst = _build_wl10_zk(ack_cmd=0, ack_rid=0)
         with pytest.raises(ZKErrorResponse, match='No response'):
             inst.wl10_reboot()
+
+    def test_failed_refresh_blocks_restart(self):
+        inst = _build_wl10_zk()
+        inst._wl10_refresh_data = MagicMock(return_value=False)
+        with pytest.raises(ZKErrorResponse, match='refresh'):
+            inst.wl10_reboot()
+        assert inst._ZK__sock.send.call_count == 0
+
+    def test_no_ack_sends_once_marks_connection_unusable(self):
+        inst = _build_wl10_zk(ack_cmd=0, ack_rid=0)
+        inst._wl10_refresh_data = MagicMock(side_effect=lambda: (
+            inst._events.append('refresh') or True))
+        with pytest.raises(ZKErrorResponse, match='reboot outcome is unknown'):
+            inst.wl10_reboot()
+        assert inst._ZK__sock.send.call_count == 1
+        sent_commands = [unpack('<H', call.args[0][8:10])[0]
+                         for call in inst._ZK__sock.send.call_args_list]
+        assert sent_commands.count(const.CMD_RESTART) == 1
+        assert inst._events == ['refresh']
+        assert inst.is_connect is False

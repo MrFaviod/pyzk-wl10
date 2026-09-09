@@ -79,6 +79,18 @@ class TestParseUsers:
         users = zk_instance._wl10_parse_users(raw)
         assert [u.uid for u in users] == [5]
 
+    def test_parse_tracks_template_uids_and_resets_on_empty_table(self, zk_instance):
+        real = pack_user_record(uid=5, name=b'Alice', user_id=b'100')
+        slots = pack_user_record(uid=3, privilege=0x31) + pack_user_record(uid=7, privilege=0x31)
+        users = zk_instance._wl10_parse_users(
+            pack_bulk_response(real + slots, WL10_USER_RECORD_SIZE))
+        assert [u.uid for u in users] == [5]
+        assert zk_instance._wl10_template_uids == {3, 7}
+
+        assert zk_instance._wl10_parse_users(
+            pack_bulk_response(b'', WL10_USER_RECORD_SIZE)) == []
+        assert zk_instance._wl10_template_uids == set()
+
     def test_decode_alphanumeric_badge_preserved(self, zk_instance):
         # A user with an alphanumeric badge (user_id='AB12') and a name that
         # contains digits ('Juan 123') must keep the badge as-is. The scan

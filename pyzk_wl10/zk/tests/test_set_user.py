@@ -14,17 +14,13 @@ from zk import const
 from zk.base import ZK
 from zk.const import USER_ADMIN, USER_DEFAULT, WL10_USER_RECORD_SIZE
 from zk.exception import ZKErrorResponse
+from zk.user import User
+
+
 
 
 def _build_wl10_zk(ack_cmd=const.CMD_ACK_OK, ack_rid=100):
-    """Build a mock-backed ZK instance for write/delete tests.
-
-    Parameters:
-        ack_cmd: command field that the mocked _wl10_read_ack returns.
-        ack_rid: reply_id that the mocked _wl10_read_ack returns — used
-                 to verify that wl10_set_user/wl10_delete_user
-                 synchronise self.__reply_id after each operation.
-    """
+    """Build a mock-backed ZK instance for write/delete tests."""
     inst = object.__new__(ZK)
     inst.wl10 = True
     inst.verbose = False
@@ -36,26 +32,34 @@ def _build_wl10_zk(ack_cmd=const.CMD_ACK_OK, ack_rid=100):
     inst._ZK__timeout = 5
     inst.next_uid = 1
     inst.next_user_id = '1'
-    # Mocked socket — captures TCP frames for inspection
+    inst._events = []
+    inst._users = [
+        User(1, 'Alice', USER_DEFAULT, user_id='999950', card=0),
+        User(42, 'Forty Two', USER_DEFAULT, user_id='999942', card=0),
+    ]
     inst._ZK__sock = MagicMock()
-    # Mocked ACK reader — new signature returns (cmd, rid) tuple
     inst._wl10_read_ack = MagicMock(return_value=(ack_cmd, ack_rid))
-    # Mocked refresh_data so it doesn't call __send_command (which
-    # expects a real socket).  We're testing our own raw path only.
+    inst._wl10_template_uids = set()
+    inst._wl10_get_users = MagicMock(side_effect=lambda: (
+        inst._events.append('read') or inst._users))
+    inst._wl10_refresh_data = MagicMock(side_effect=lambda: (
+        inst._events.append('refresh') or True))
     inst.refresh_data = MagicMock(return_value=True)
-    # Mock _wl10_refresh_data to prevent sending refresh commands to socket
-    inst._wl10_refresh_data = MagicMock(return_value=True)
-    # Mock _wl10_get_users to prevent network calls in delete tests
-    inst._wl10_get_users = MagicMock(return_value=[])
     return inst
 
 
+def _command_codes(sock):
+    return [unpack('<H', call.args[0][8:10])[0]
+            for call in sock.send.call_args_list]
+
+
 def _first_send_payload(sock):
-    """Return the command_string from the very first socket.send call
-    (the user write, not the subsequent refresh_data call)."""
+    """Return the command_string from the very first socket.send call."""
     assert sock.send.call_count >= 1
     sent = sock.send.call_args_list[0][0][0]
-    return sent[16:]  # skip TCP top (8) + ZK header (8)
+    return sent[16:]
+
+
 
 
 class TestWl10SetUserGuard:
@@ -216,9 +220,9 @@ class TestWl10DeleteUser:
     def test_ack_error_returns_false(self):
         """ACK_ERROR on delete should return False (not raise)."""
         inst = _build_wl10_zk(ack_cmd=const.CMD_ACK_ERROR, ack_rid=9001)
+        inst._users = [User(1, 'Alice', USER_DEFAULT, user_id='999950', card=0)]
         result = inst.wl10_delete_user(uid=1)
         assert result is False
-        # reply_id must still be updated
         assert inst._ZK__reply_id == 9001
 
     def test_delete_payload_format(self):
@@ -285,9 +289,123 @@ class TestWl10SetUserBadgeRequirement:
             inst.wl10_set_user(uid=1)
         assert inst._ZK__sock.send.call_count == 0
 
-    def test_auto_uid_with_explicit_badge_ok(self):
+    def test_uid_is_required_before_socket(self):
         inst = _build_wl10_zk()
-        # uid=None still auto-assigns from next_uid (safe after BUG-2),
-        # but the badge must be provided explicitly.
-        result = inst.wl10_set_user(uid=None, user_id='999950')
-        assert result is True
+        with pytest.raises(ZKErrorResponse, match='uid is required in WL10 mode'):
+            inst.wl10_set_user(uid=None, user_id='999950')
+        assert inst._ZK__sock.send.call_count == 0
+
+    @pytest.mark.parametrize('field, value, kwargs', [
+        ('uid', 'bad', {'uid': 'bad', 'user_id': '999950'}),
+        ('card', 'bad', {'uid': 1, 'user_id': '999950', 'card': 'bad'}),
+    ])
+    def test_nonnumeric_values_fail_before_socket(self, field, value, kwargs):
+        inst = _build_wl10_zk()
+        with pytest.raises(ZKErrorResponse, match=field):
+            inst.wl10_set_user(**kwargs)
+
+    @pytest.mark.parametrize('kwargs', [
+        {'uid': 3, 'user_id': object()},
+        {'uid': 3, 'name': object(), 'user_id': '999950'},
+        {'uid': 3, 'password': object(), 'user_id': '999950'},
+        {'uid': 3, 'group_id': object(), 'user_id': '999950'},
+    ])
+    def test_invalid_wire_fields_fail_before_read_or_refresh(self, kwargs):
+        inst = _build_wl10_zk()
+        with pytest.raises(ZKErrorResponse):
+            inst.wl10_set_user(**kwargs)
+        assert inst._events == []
+        assert inst._ZK__sock.send.call_count == 0
+
+    def test_success_order_is_read_refresh_mutation(self):
+        inst = _build_wl10_zk()
+        assert inst.wl10_set_user(uid=3, name='Alice', user_id='999950') is True
+        assert inst._events[:2] == ['read', 'refresh']
+        assert _command_codes(inst._ZK__sock).count(const.CMD_USER_WRQ) == 1
+
+    def test_verification_read_failure_normalizes_write_unknown(self):
+        inst = _build_wl10_zk(ack_cmd=0, ack_rid=0)
+        inst._wl10_get_users.side_effect = [inst._users, ZKErrorResponse('incomplete')]
+        with pytest.raises(ZKErrorResponse, match='write outcome is unknown'):
+            inst.wl10_set_user(uid=3, name='Alice', user_id='999950')
+
+    def test_verification_read_failure_normalizes_delete_unknown(self):
+        inst = _build_wl10_zk(ack_cmd=0, ack_rid=0)
+        inst._wl10_get_users.side_effect = [inst._users, ZKErrorResponse('incomplete')]
+        with pytest.raises(ZKErrorResponse, match='delete outcome is unknown'):
+            inst.wl10_delete_user(uid=42)
+        assert _command_codes(inst._ZK__sock).count(const.CMD_DELETE_USER) == 1
+
+
+class TestWl10MutationSafety:
+    def test_template_uid_blocks_set_before_refresh(self):
+        inst = _build_wl10_zk()
+        inst._wl10_template_uids = {3}
+        with pytest.raises(ZKErrorResponse, match='uid 3 is reserved for fingerprint templates'):
+            inst.wl10_set_user(uid=3, user_id='999950')
+        assert inst._wl10_get_users.call_count == 1
+        inst._wl10_refresh_data.assert_not_called()
+        assert const.CMD_USER_WRQ not in _command_codes(inst._ZK__sock)
+
+    def test_template_uid_blocks_delete_before_refresh(self):
+        inst = _build_wl10_zk()
+        inst._wl10_get_users.side_effect = lambda: (
+            setattr(inst, '_wl10_template_uids', {3}) or [])
+        with pytest.raises(ZKErrorResponse, match='uid 3 is reserved for fingerprint templates'):
+            inst.wl10_delete_user(uid=3)
+        assert inst._wl10_get_users.call_count == 1
+        inst._wl10_refresh_data.assert_not_called()
+        assert const.CMD_DELETE_USER not in _command_codes(inst._ZK__sock)
+
+    def test_failed_preflight_blocks_set(self):
+        inst = _build_wl10_zk()
+        inst._wl10_get_users.side_effect = ZKErrorResponse('preflight failed')
+        with pytest.raises(ZKErrorResponse, match='preflight failed'):
+            inst.wl10_set_user(uid=3, user_id='999950')
+        inst._wl10_refresh_data.assert_not_called()
+        assert inst._ZK__sock.send.call_count == 0
+
+    def test_failed_refresh_blocks_set(self):
+        inst = _build_wl10_zk()
+        inst._wl10_refresh_data = MagicMock(return_value=False)
+        with pytest.raises(ZKErrorResponse, match='refresh'):
+            inst.wl10_set_user(uid=3, user_id='999950')
+        assert const.CMD_USER_WRQ not in _command_codes(inst._ZK__sock)
+
+    def test_unknown_write_verifies_once_without_retry(self):
+        inst = _build_wl10_zk(ack_cmd=0, ack_rid=0)
+        written = User(3, 'Alice', USER_DEFAULT, user_id='999950', card=0)
+        inst._wl10_get_users.side_effect = [[User(1, 'Alice', USER_DEFAULT, user_id='999950')], [written]]
+        assert inst.wl10_set_user(uid=3, name='Alice', user_id='999950') is True
+        assert _command_codes(inst._ZK__sock).count(const.CMD_USER_WRQ) == 1
+        assert inst._wl10_get_users.call_count == 2
+
+    def test_unknown_write_raises_without_retry(self):
+        inst = _build_wl10_zk(ack_cmd=0, ack_rid=0)
+        inst._wl10_get_users.side_effect = [[], []]
+        with pytest.raises(ZKErrorResponse, match='write outcome is unknown'):
+            inst.wl10_set_user(uid=3, name='Alice', user_id='999950')
+        assert _command_codes(inst._ZK__sock).count(const.CMD_USER_WRQ) == 1
+
+    def test_delete_missing_user_is_noop(self):
+        inst = _build_wl10_zk()
+        inst._wl10_get_users.return_value = []
+        assert inst.wl10_delete_user(uid=3) is False
+        inst._wl10_refresh_data.assert_not_called()
+        assert inst._ZK__sock.send.call_count == 0
+
+    def test_unknown_delete_verifies_absence_once(self):
+        inst = _build_wl10_zk(ack_cmd=0, ack_rid=0)
+        existing = User(42, 'Forty Two', USER_DEFAULT, user_id='999942')
+        inst._wl10_get_users.side_effect = [[existing], []]
+        assert inst.wl10_delete_user(uid=42) is True
+        assert _command_codes(inst._ZK__sock).count(const.CMD_DELETE_USER) == 1
+        assert inst._wl10_get_users.call_count == 2
+
+    def test_unknown_delete_raises_without_retry(self):
+        inst = _build_wl10_zk(ack_cmd=0, ack_rid=0)
+        existing = User(42, 'Forty Two', USER_DEFAULT, user_id='999942')
+        inst._wl10_get_users.side_effect = [[existing], [existing]]
+        with pytest.raises(ZKErrorResponse, match='delete outcome is unknown'):
+            inst.wl10_delete_user(uid=42)
+        assert _command_codes(inst._ZK__sock).count(const.CMD_DELETE_USER) == 1
