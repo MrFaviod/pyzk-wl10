@@ -5,13 +5,13 @@
 Fork of `fananimi/pyzk` adding **ZK WL10 / AK3750** fingerprint attendance
 terminal support via a reverse-engineered TCP protocol. Tested against
 AK3750WIFI_TFT firmware "Ver 6.60 May 19 2023". Pure Python, stdlib-only
-runtime, ~3700 LOC. **Repository root**: `/home/informatica/zk2`.
+runtime, ~3700 LOC. **Repository root**: `/home/informatica/Dev/zkteco/zk2`.
 
 **Before touching `base.py`'s WL10 read/write paths, read
-`specs/wl10_reengineering_review.md`** — an adversarial review of this
-library documenting 6 unfixed bugs (3 CRITICAL), their root causes, and
-proposed fixes with tests. The "Known Limitations" section below condenses
-the operational ones.
+`specs/wl10_reengineering_review.md`** — the adversarial review and dated
+addendum are historical evidence, not proof that every risk is closed. The
+current implementation has focused offline coverage, but live-device support
+remains operation- and evidence-gated.
 
 ## Device Protocol Summary
 
@@ -38,22 +38,23 @@ Deletion **persists** on tested devices (<DEVICE_IP>, <DEVICE_IP>).
 ## Code Structure
 
 ```
-/home/informatica/zk2/
+/home/informatica/Dev/zkteco/zk2/
 ├── listar_marcaciones.py          # CLI: dump attendance w/ --since/--until/--csv
+├── wl10_probe_read.py             # Read-only raw capture probe; new output dir required
 ├── wl10_probe_write.py            # One-off protocol probe (write+verify+delete)
 ├── check_device.py                # Portable Windows read-only diagnostic (users + attendance, ES labels)
 ├── test_wl10_write.py             # Live-device E2E (set_user/delete_user)
-├── test_runner_wl10.py            # Live-device runner (uid<=1000, user_id>=9999, no overwrite/delete)
+├── test_runner_wl10.py            # Read-only by default; explicit one-write mode
 ├── README.md                      # Full protocol docs
 ├── AGENTS.md                      # This file
 ├── specs/
-│   └── wl10_reengineering_review.md  # Adversarial review: 6 unfixed bugs (3 CRITICAL) + fixes/tests
+│   └── wl10_reengineering_review.md  # Historical review plus sanitized 2026-09-10 device addendum
 └── pyzk_wl10/
     └── zk/
-        ├── base.py                # class ZK (2441 lines — the monolith)
+        ├── base.py                # class ZK (2449 lines — the monolith)
         ├── const.py               # Protocol constants (CMD_*, WL10_*_SIZE, WL10_VERIFY_*)
         ├── user.py / attendance.py / finger.py / exception.py
-        └── tests/                 # 115 offline tests (see pyzk_wl10/zk/tests/AGENTS.md)
+        └── tests/                 # 199 collected offline tests (see pyzk_wl10/zk/tests/AGENTS.md)
 ```
 
 ## Key API — `zk.base.ZK`
@@ -61,21 +62,22 @@ Deletion **persists** on tested devices (<DEVICE_IP>, <DEVICE_IP>).
 **Constructor** (base.py L91): `ZK(ip, port=4370, timeout=60, password=0, force_udp=False, ommit_ping=False, verbose=False, encoding='UTF-8', wl10=False, tcp_maxseg=None, gap_timeout=1)`
 - WL10 requires TCP: `force_udp=False` + `wl10=True`
 - `tcp_maxseg` sets TCP_MAXSEG before connect (fixes PMTUD blackhole on low-MTU VPN routes); also auto-set to 1200 by the resilience path on persistent no-ACK (see below)
-- `gap_timeout` sets the per-attempt inter-chunk silence gap (base.py `_wl10_read_raw_command`); gaps grow 1×/2×/4× across the 3 drain attempts, clamped by `timeout`. Default `1` (LAN behavior preserved). `None` is normalized to `1` (CLIs pass `None` via argparse default — a raw `None` would break the `min(gap_timeout * 2**attempt, __timeout)` arithmetic)
+- `gap_timeout` sets the per-attempt inter-chunk silence gap (base.py `_wl10_read_raw_command`); gaps grow 1×/2×/4× across the 3 drain attempts, clamped by `timeout`. Default `1` (LAN behavior preserved). `None` is normalized to `1` (CLIs pass `None` via argparse default — a raw `None` would break the arithmetic)
 
 **General WL10 resilience mode** (applies to ALL wl10 devices, LAN + VPN — no per-IP config):
-- `_wl10_read_raw_command` (base.py L833+) drains until either (a) a **terminal ACK** is detected in the TCP stream (`_wl10_scan_for_terminal_ack`: framed packet, `dsize>=8`, `pcmd in (CMD_ACK_OK=2000, CMD_ACK_ERROR=2001)`) → ends drain early (LAN: same-tick ACK, faster than old 1s wait), or (b) adaptive silence fallback: per-attempt gap `min(gap_timeout * 2**attempt, __timeout)` (1s → 2s → 4s with defaults). `__reply_id` is synced from the ACK rid even on `CMD_ACK_ERROR`; `__session_id` is NEVER updated from bulk packets.
+- `_wl10_read_raw_command` (base.py L838+) drains until either (a) a **terminal ACK** is detected in the TCP stream (`_wl10_scan_for_terminal_ack`: framed packet, `dsize>=8`, `pcmd in (CMD_ACK_OK=2000, CMD_ACK_ERROR=2001)`) → ends drain early (LAN: same-tick ACK, faster than old 1s wait), or (b) adaptive silence fallback: per-attempt gap `min(gap_timeout * 2**attempt, __timeout)` (1s → 2s → 4s with defaults). `__reply_id` is synced from the ACK rid even on `CMD_ACK_ERROR`; `__session_id` is NEVER updated from bulk packets.
 - On 3 incomplete bulk attempts with **no terminal ACK observed** and `tcp_maxseg` unset, `_wl10_get_users`/`_wl10_get_attendance` auto-escalate: set `tcp_maxseg=1200`, `_wl10_reconnect()`, and retry up to **3 clamped recovery cycles** (each bounded by `min(__timeout, 5)`; break on a complete bulk). The multi-cycle loop handles flapping tunnels (observed ~50% up/down duty on the Bella Vista VPN) where a single recovery attempt is a coin flip. LAN devices complete attempt 1 (ACK arrives) → never reach escalation → zero behavior change.
-- `_wl10_reconnect()` (base.py L801) — private recovery: marks `is_connect=False`, temporarily sets `ommit_ping=True` (ICMP may be blocked even when TCP is recoverable), calls `connect()` for a fresh handshake (resets `__session_id`/`__reply_id`). Deliberately does NOT use `disconnect()` (that sends `CMD_EXIT` first and can fail on a broken VPN). `__create_socket` closes the old socket before creating the replacement (fd-leak fix).
+- `_wl10_reconnect()` (base.py L806) — private recovery: marks `is_connect=False`, temporarily sets `ommit_ping=True` (ICMP may be blocked even when TCP is recoverable), calls `connect()` for a fresh handshake (resets `__session_id`/`__reply_id`). Deliberately does NOT use `disconnect()` (that sends `CMD_EXIT` first and can fail on a broken VPN). `__create_socket` closes the old socket before creating the replacement (fd-leak fix).
 
 **Public WL10 API** (line refs in `pyzk_wl10/zk/base.py`):
-- `wl10_get_users()` L1414 → `list[User]`
-- `wl10_get_attendance()` L1422 → `list[Attendance]`
-- `wl10_set_user(uid=None, name='', privilege=0, password='', group_id='', user_id='', card=0, verify_mode=1)` L1494 → `bool`
-- `wl10_delete_user(uid=0, user_id='')` L1588 → `bool`
-- `wl10_reboot()` L1639 → `bool` — marks connection closed on success
+- `wl10_get_users()` L1423 → `list[User]`; updates `next_uid`/`next_user_id` from the parsed table
+- `wl10_get_attendance()` L1438 → `list[Attendance]`
+- `wl10_set_user(uid=None, name='', privilege=0, password='', group_id='', user_id='', card=0, verify_mode=1)` L1510 → `bool`; compatibility signature, but `uid=None` is rejected before socket I/O; explicit uid and badge are required
+- `wl10_delete_user(uid=0, user_id='')` L1605 → `bool`; preflights template slots and current users
+- `wl10_reboot()` L1662 → `bool` — marks connection closed on success
 
-**Internal helpers** (`pyzk_wl10/zk/base.py`): `_wl10_get_users` L1081, `_wl10_get_attendance` L1156, `_wl10_parse_users` L1238, `_wl10_parse_attendance` L1349, `_wl10_read_sizes` L597, `_wl10_scan_for_terminal_ack` L758, `_wl10_reconnect` L801, `_wl10_read_raw_command` L833 (ACK-terminated drain + adaptive silence fallback; syncs `__reply_id` from terminal ACK; does NOT sync `__session_id`), `_wl10_read_ack` L1430 (syncs `__reply_id`), `_wl10_refresh_data` L1471.
+**Native dispatch in WL10 mode**: `get_users()` → `wl10_get_users()`, `set_user()` → `wl10_set_user()`, `delete_user()` → `wl10_delete_user()`, `refresh_data()` → `_wl10_refresh_data()`, and `restart()` → `wl10_reboot()`.
+**Internal helpers** (`pyzk_wl10/zk/base.py`): `_wl10_get_users` L1086, `_wl10_get_attendance` L1161, `_wl10_parse_users` L1243, `_wl10_parse_attendance` L1354, `_wl10_read_sizes` L598, `_wl10_scan_for_terminal_ack` L763, `_wl10_reconnect` L806, `_wl10_read_raw_command` L838 (ACK-terminated drain + adaptive silence fallback; syncs `__reply_id` from terminal ACK; does NOT sync `__session_id`), `_wl10_read_ack` L1446 (syncs `__reply_id`), `_wl10_refresh_data` L1487.
 
 ## Usage
 
@@ -88,7 +90,7 @@ users = zk.wl10_get_users()
 attendance = zk.wl10_get_attendance()
 
 zk.wl10_set_user(uid=1000, name='Alice', privilege=0, user_id='999950', card=0)
-zk.wl10_set_user(uid=1001, name='Bob', privilege=14, user_id='999951')  # ADMIN
+zk.wl10_set_user(uid=8, name='Bob', privilege=14, user_id='999951')  # ADMIN example; use only after live gates
 zk.wl10_delete_user(uid=1000)
 zk.wl10_reboot()          # connection becomes unusable after this
 zk.disconnect()
@@ -97,59 +99,71 @@ zk.disconnect()
 ## Test Suite
 
 ```bash
-python3 -m pytest pyzk_wl10/zk/tests/ -q     # 115 passed
+python3 -m pytest pyzk_wl10/zk/tests/ --collect-only -q  # 199 collected
+python3 -m pytest pyzk_wl10/zk/tests/ -q                 # 199 passed, offline
 ```
 
-**HAZARD**: a bare `pytest` from the repo root collects the live-device
-scripts (`test_wl10_write.py`, `test_runner_wl10.py` match `test_*.py`) —
-always run with the explicit `pyzk_wl10/zk/tests/` path. Test conventions:
-`pyzk_wl10/zk/tests/AGENTS.md`.
+**HAZARD**: a bare `pytest` from the repo root also collects live-device
+scripts (`test_wl10_write.py`, `test_runner_wl10.py` match `test_*.py`) and
+tries to hit real hardware. Always pass the explicit `pyzk_wl10/zk/tests/` path.
+Test conventions: `pyzk_wl10/zk/tests/AGENTS.md`.
 
 ## Live-Device Scripts — NEVER IN CI
 
 All take a device IP and touch real hardware. Never run casually or in CI:
-- `listar_marcaciones.py IP [--since ... --csv --tcp-maxseg N --gap-timeout N]` — dump attendance (VPN-tuned flags)
-- `wl10_probe_write.py IP --verbose` — writes/deletes real users
+- `wl10_probe_read.py IP --output-dir DIR [--timeout N --tcp-maxseg N --gap-timeout N]` — read-only raw capture; output directory is required and must not already exist
+- `test_runner_wl10.py IP [--write-one --uid UID --user-id BADGE --evidence-json FILE]` — read-only by default; `--write-one` permits exactly one explicit write and leaves residue; no delete/cleanup/retry
+- `listar_marcaciones.py IP [--since ... --csv --tcp-maxseg N --gap-timeout N]` — dump attendance
+- `wl10_probe_write.py IP --verbose` — legacy writes/deletes real users; prohibited unless separately authorized
 - `check_device.py` — Windows read-only diagnostic (users + attendance, ES labels)
-- `test_wl10_write.py IP --verbose` — live E2E (excluded from ruff)
-- `test_runner_wl10.py IP1 IP2 --verbose` — writes 2 test users, NO delete
+- `test_wl10_write.py IP --verbose` — live E2E; prohibited unless separately authorized
 
 ## Known Limitations
 
-1. **Max uid = 1000** on AK3750 Ver 6.60 — device rejects uid > 1000 with `ACK_ERROR`. Use uids ≤ 1000 and user_id ≥ 9999 for test isolation.
-2. **Delete persists** on tested devices. `wl10_delete_user` uses `pack('<H', uid)` (unsigned short) for uids up to 65535.
-3. **Concurrent writes need `refresh_data()` between calls** — without `__reply_id` sync, writes after `wl10_get_users()` fail with `ACK_ERROR`.
-4. **No fingerprint/template write support** — basic user records only.
-5. **Badge/user_id limited to 6 chars** (max 999999, 24B ASCII field).
+1. **Max uid = 1000** on AK3750 Ver 6.60; WL10 writes require an explicit `uid` in 1..1000.
+2. **Badge/user_id is required for WL10 writes**, must be an explicit non-empty value, and is a 6-character ASCII field (test pool `999950`–`999999`). The compatibility `uid=None` signature is fail-closed: it raises before any socket I/O; never rely on automatic allocation.
+3. **Template-slot safety is mandatory**: records with `priv=0x31` (49) are tracked in `_wl10_template_uids`, excluded from user results, and rejected as write/delete targets. The write/delete preflight reads the table first and fails closed on read failure, template collision, or uncertain outcome.
+4. **WL10 mutation ordering**: native `get_users`, `set_user`, `delete_user`, `refresh_data`, and `restart` dispatch to `wl10_*`/raw WL10 paths when `self.wl10` is true. Writes/deletes perform preflight, raw `REFRESHDATA`, exactly one mutation, and no automatic retry or cleanup on unknown outcome.
+5. **No fingerprint/template write support** — basic user records only.
 6. **`_wl10_read_sizes()` returns False** on this firmware — capacities not queryable.
-7. **WL10 reengineering fixes applied** — all bugs from `specs/wl10_reengineering_review.md` are fixed (139 offline tests, up from 115):
-   - Template/linking slots (`priv=0x31` = 49) are excluded from `wl10_get_users()` — no more `NN-<scan>` fake users (review BUG-1).
-   - `wl10_get_users()` syncs `next_uid`/`next_user_id` — auto-assigned uid is no longer stale (review BUG-5).
-   - `wl10_set_user()` validates uid (1..1000) and card range before any socket write (review BUG-2).
-   - Alphanumeric badges preserved (review BUG-1); multibyte names truncate at a char boundary (review BUG-3).
-   - Native `set_user`/`delete_user`/`refresh_data` dispatch to `wl10_*` in WL10 mode.
-   - `wl10_set_user()` requires an explicit badge (`user_id`) — auto-assigning from uid was removed to prevent collisions.
-   - Attendance `uid=0` (deleted user) is skipped (review BUG-6); dedup key includes the flag byte.
-   - **M4 [data-model limitation, not a bug]**: a record the device stores with no name but a valid uid shows as `NN-<uid>` — the device holds only a fingerprint template, no name to display.
+7. **Attendance `uid=0` records are skipped; deduplication includes the flag byte.**
+8. **Historical review bugs are not all proven fixed**: current tests cover the audited parser/dispatch/guard paths, but no blanket claim is made that every historical finding is fixed or live-certified. The historical `uid=None` overwrite scenario is blocked by the current guard.
+9. **M4 data-model limitation**: a record with no name but a valid uid may display as `NN-<uid>`; this is device data, not proof of a missing name.
+
+## WL10 support matrix
+
+| Mode | Supported operations | Evidence status |
+|---|---|---|
+| Offline | pytest collection and suite; fake-socket/parser/dispatch/runner/probe tests | **Validated**: 199 collected and 199 passed |
+| Read-only live | `wl10_probe_read.py` with a new output directory; `test_runner_wl10.py` default mode | **Implemented, not validated on <DEVICE_IP>**; Task 6 started but timed out before a summary |
+| One-write live | `test_runner_wl10.py --write-one --uid ... --user-id ... --evidence-json ...` | **Not validated**: Task 6 identity/completeness/parser/template/baseline gates failed; Task 7 was blocked |
+| Prohibited | delete, reboot, power, time, clear, door, enable/disable; legacy mutation scripts | **Not exercised on <DEVICE_IP>** |
+| Unverified | any live operation lacking identity/completeness/parser/template/baseline evidence; raw packet capture without capability | **Unverified on <DEVICE_IP>**; no success inferred |
+
+No destructive operation was exercised on `<DEVICE_IP>`; no write was performed.
 
 ## Commands
 
 ```bash
-python3 -m pytest pyzk_wl10/zk/tests/ -q                          # offline suite (139) — the verification gate
-python3 -m pytest pyzk_wl10/zk/tests/test_set_user.py -v          # single file
-ruff check .                                                      # lint (config: pyproject.toml; ruff not installed in this env — pytest is the gate)
-python3 listar_marcaciones.py <DEVICE_IP> --since 2026-07-01 --csv
-python3 listar_marcaciones.py <DEVICE_IP> --since 2026-07-01 --tcp-maxseg 1200 --gap-timeout 3   # VPN path (manual overrides; resilience auto-applies without flags)
+python3 -m pytest pyzk_wl10/zk/tests/ --collect-only -q
+python3 -m pytest pyzk_wl10/zk/tests/ -q
+python3 wl10_probe_read.py <DEVICE_IP> --output-dir /path/to/new-capture --timeout 20
+python3 test_runner_wl10.py <DEVICE_IP>                 # read-only default
+python3 test_runner_wl10.py <DEVICE_IP> --write-one --uid 8 --user-id 999950 --evidence-json /path/to/new-evidence.json  # explicit single write only after gates
 ```
+
+## Contribution traceability
+
+Protocol-changing agents own one work-unit commit with code and tests together. Commits require contiguous `Agent-Role`, `Agent-Id`, and `Verification` trailers. Concurrent edits to `base.py` are prohibited. Raw device evidence is private and must never be committed or copied into prompts.
 
 ## Critical Implementation Notes
 
-1. **Never break the read path** — `wl10_get_users` / `wl10_get_attendance` must stay unchanged.
-2. **`__reply_id` must be synced** after every raw write AND bulk read. `_wl10_read_raw_command` syncs it from the ACK packet in the bulk stream; write/delete ACKs come from `_wl10_read_ack` → set `self._ZK__reply_id = ack_rid`.
-3. **Use the raw TCP path for writes** — `__send_command` doesn't work with WL10 bulk responses.
-4. **Badge pool**: 999950–999999 for test users (6-char limit).
-5. **Privilege**: `0 = USER_DEFAULT`, `14 = USER_ADMIN`; anything else clamps to `0`. `verify_mode` must be in `WL10_VERIFY_MODES` (default 1 = fingerprint) or it clamps.
-6. **`refresh_data()` required** between bulk operations to settle device state.
-7. **`__session_id` is NOT updated** by `_wl10_read_raw_command` — bulk `CMD_DATA` packets have garbled sid bytes 4-7; updating from them corrupts the session.
-8. **Never call `wl10_set_user(uid=None)`** — `next_uid` stays stale (`wl10_get_users()` never updates it), so the auto-assigned uid is 1: it silently **overwrites the Admin**. Always pass an explicit uid, and keep it ≤ 1000 (see specs doc BUG-5).
-9. **Inter-chunk drain gap = `min(gap_timeout * 2**attempt, self.__timeout)`** (base.py `_wl10_read_raw_command`) — grows 1×/2×/4× across the 3 drain attempts (VPN path tolerates jitter); LAN devices end on the terminal ACK in the same tick, so the gap is never exercised. `setsockopt(TCP_MAXSEG)` is wrapped in `try/except OSError` (Windows: option unsupported, bpo-23302).
+1. **Never break the read path** — `wl10_get_users` / `wl10_get_attendance` must stay unchanged unless a protocol work unit updates code and tests together.
+2. **`__reply_id` must be synced** after every raw write and bulk read. `_wl10_read_raw_command` syncs it from the terminal ACK; write/delete ACKs come from `_wl10_read_ack`.
+3. **Use the raw TCP path for WL10 writes** — `__send_command` does not handle WL10 bulk responses.
+4. **Badge pool**: 999950–999999 for test users; production badges need explicit review.
+5. **Privilege**: `0 = USER_DEFAULT`, `14 = USER_ADMIN`; other values clamp to `0`. `verify_mode` clamps to supported WL10 modes.
+6. **`refresh_data()` is part of the WL10 mutation sequence**, not a substitute for preflight.
+7. **`__session_id` is not updated from bulk `CMD_DATA` packets.**
+8. **Never use `uid=None` for WL10 writes; pass an explicit uid and badge.**
+9. **Inter-chunk drain gap** is `min(gap_timeout * 2**attempt, self.__timeout)` across three attempts; `TCP_MAXSEG` setup tolerates unsupported platforms.

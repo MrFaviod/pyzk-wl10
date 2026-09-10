@@ -271,3 +271,52 @@ En el modelo estándar ZK, los templates viven en una tabla separada gestionada 
 | Reportes de huellas perdidas | Ninguno público para AK3750/WL10 | búsqueda | SIN HALLAZGOS |
 
 **Síntesis externa**: el modelo interleaved (templates en slots priv=0x31) es **RE local únicamente**; las fuentes públicas afirman lo contrario (tablas separadas). Los dos desenlaces posibles (sobrescritura destructiva o rechazo ACK_ERROR) son consistentes con la evidencia pública — solo una prueba empírica con escritura los distingue (prohibida en esta fase).
+
+---
+
+# ADDENDUM — 2026-09-10 UTC — TARGET <DEVICE_IP>
+
+This dated addendum records the Task 6 characterization without rewriting
+the historical v2/v3 findings above. It contains no raw payload bytes,
+attendance rows, badges, serials, MAC addresses, or raw capture filenames.
+
+## Result
+
+- Target: `<DEVICE_IP>`.
+- Device identity, firmware, platform, and other identity fields are
+  unavailable: both the default and `tcp-maxseg=1200`/VPN profiles failed to
+  produce a summary.
+- The default read-only profile started at 01:55:22Z, was interrupted by the
+  wrapper timeout at 01:57:22Z, and left five binary captures without a
+  summary. No mutation was observed.
+- The VPN profile was invoked at 01:57:53Z and failed before probing because
+  its output directory already existed (`Errno 17`). No summary was produced;
+  no mutation was observed.
+- Transport capture was unavailable: `tcpdump` was attempted without sudo
+  and failed because `CAP_NET_RAW` is unavailable.
+
+## Sanitized capture facts
+
+The five default payloads are retained privately in the ignored SDD evidence
+root. Only lengths and SHA-256 digests are recorded here:
+
+| Capture ordinal | Length | SHA-256 |
+|---:|---:|---|
+| 1 | 588 B | `005f057892da47849a982647215065a25cc1fbf1727377e7abd48298f04d8dc6` |
+| 2 | 588 B | `005f057892da47849a982647215065a25cc1fbf1727377e7abd48298f04d8dc6` |
+| 3 | 8 B | `b6f59fbbfb03ee482a941683ab267d59ecb46ee668a1fa64ecd445b946e2d4f5` |
+| 4 | 0 B | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| 5 | 0 B | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+
+ACK interpretation and completeness status are unavailable because no probe
+summary was produced. Template-slot UID sets, parser counts, deduplication
+aggregates, orphan aggregates, and a consistent baseline re-read are likewise
+unavailable. No device identity or read success is inferred from the partial
+captures.
+
+## Safety gate
+
+The isolated one-write operation was explicitly skipped and remains blocked:
+Task 6 failed its identity, completeness, parser, template, and baseline
+gates, so Task 7 was not authorized. No write, delete, reboot, or cleanup was
+attempted.
