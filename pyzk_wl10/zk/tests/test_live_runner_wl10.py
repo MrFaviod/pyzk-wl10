@@ -227,6 +227,27 @@ def test_intermediate_symlink_evidence_rejects_before_connection(monkeypatch, tm
 @pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY") or
                     os.open not in os.supports_dir_fd or os.stat not in os.supports_dir_fd,
                     reason="requires O_NOFOLLOW, O_DIRECTORY, and dir_fd")
+def test_parent_replacement_after_preflight_stays_in_original_directory(tmp_path):
+    mod = _load_runner()
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    evidence = parent / "evidence.json"
+
+    parent_fd, basename = mod._preflight_evidence(evidence)
+    moved = tmp_path / "moved"
+    parent.rename(moved)
+    parent.mkdir()
+    try:
+        mod._write_evidence(parent_fd, basename, {"outcome": "success"})
+    finally:
+        os.close(parent_fd)
+    assert (moved / "evidence.json").exists()
+    assert not (parent / "evidence.json").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY") or
+                    os.open not in os.supports_dir_fd or os.stat not in os.supports_dir_fd,
+                    reason="requires O_NOFOLLOW, O_DIRECTORY, and dir_fd")
 def test_parent_symlink_replacement_after_preflight_cannot_escape(tmp_path):
     mod = _load_runner()
     parent = tmp_path / "parent"
@@ -235,13 +256,15 @@ def test_parent_symlink_replacement_after_preflight_cannot_escape(tmp_path):
     outside.mkdir()
     evidence = parent / "evidence.json"
 
-    mod._preflight_evidence(evidence)
+    parent_fd, basename = mod._preflight_evidence(evidence)
     moved = tmp_path / "moved"
     parent.rename(moved)
     parent.symlink_to(outside, target_is_directory=True)
-
-    with pytest.raises(OSError):
-        mod._write_evidence(evidence, {"outcome": "success"})
+    try:
+        mod._write_evidence(parent_fd, basename, {"outcome": "success"})
+    finally:
+        os.close(parent_fd)
+    assert (moved / "evidence.json").exists()
     assert not (outside / "evidence.json").exists()
 
 
@@ -260,11 +283,14 @@ def test_evidence_replacement_survives_failed_atomic_write(tmp_path):
     mod = _load_runner()
     evidence = tmp_path / "replacement.json"
 
-    mod._preflight_evidence(evidence)
+    parent_fd, basename = mod._preflight_evidence(evidence)
     evidence.write_text("attacker")
 
-    with pytest.raises(FileExistsError):
-        mod._write_evidence(evidence, {"outcome": "success"})
+    try:
+        with pytest.raises(FileExistsError):
+            mod._write_evidence(parent_fd, basename, {"outcome": "success"})
+    finally:
+        os.close(parent_fd)
     assert evidence.read_text() == "attacker"
 
 def test_help_documents_safe_contract(capsys):

@@ -70,13 +70,9 @@ def _open_evidence_parent(path):
     return current_fd, components[-1]
 
 
-def _write_evidence(path, evidence):
-    parent_fd, basename = _open_evidence_parent(path)
-    try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-        fd = os.open(basename, flags, 0o600, dir_fd=parent_fd)
-    finally:
-        os.close(parent_fd)
+def _write_evidence(parent_fd, basename, evidence):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    fd = os.open(basename, flags, 0o600, dir_fd=parent_fd)
     with os.fdopen(fd, 'w', encoding='utf-8') as stream:
         json.dump(evidence, stream, indent=2, sort_keys=True)
         stream.write('\n')
@@ -93,8 +89,10 @@ def _preflight_evidence(path):
             raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), path)
         if not os.access('.', os.W_OK | os.X_OK, dir_fd=parent_fd):
             raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), path)
-    finally:
+    except Exception:
         os.close(parent_fd)
+        raise
+    return parent_fd, basename
 
 
 def _parser():
@@ -127,7 +125,8 @@ def _validate_args(args):
         if not _valid_badge(args.user_id):
             raise ValueError('--user-id must be a six-digit badge in 999950..999999')
         try:
-            _preflight_evidence(args.evidence_json)
+            args._evidence_parent_fd, args._evidence_basename = _preflight_evidence(
+                args.evidence_json)
         except OSError as exc:
             raise ValueError(f'--evidence-json unavailable: {exc.strerror}') from exc
 
@@ -139,71 +138,76 @@ def _run_one(ip, args):
     evidence = {'outcome': 'failure', 'stage': 'connect', 'candidate': None}
     if args.write_one:
         evidence['candidate'] = {'uid': uid, 'user_id': badge}
-    zk = ZK(ip, timeout=20, ommit_ping=True, force_udp=False, wl10=True, verbose=args.verbose)
+    zk = None
     try:
-        zk.connect()
-        users = zk.wl10_get_users()
-        templates = set(getattr(zk, '_wl10_template_uids', set()))
-        evidence['baseline'] = _baseline(users, templates)
-        occupied_uids = {int(user.uid) for user in users}
-        occupied_badges = {_user_badge(user) for user in users if _user_badge(user)}
-
-        if not args.write_one:
-            candidate_uid = find_free_uid(occupied_uids, forbidden=templates)
-            candidate_badge = find_free_user_id(occupied_badges)
-            if candidate_uid is None or candidate_badge is None:
-                raise ValueError('no free synthetic candidate')
-            evidence.update(outcome='success', stage='read-only',
-                            candidate={'uid': candidate_uid, 'user_id': candidate_badge})
-            print(f'[OK] read-only baseline; candidate uid={candidate_uid} badge={candidate_badge}; no write performed')
-            result = True
-            return result
-        else:
-            if uid in occupied_uids or badge in occupied_badges or uid in templates:
-                raise ValueError('requested candidate is occupied or reserved')
-
-            evidence['stage'] = 'fresh-baseline'
+        zk = ZK(ip, timeout=20, ommit_ping=True, force_udp=False, wl10=True, verbose=args.verbose)
+        try:
+            zk.connect()
             users = zk.wl10_get_users()
             templates = set(getattr(zk, '_wl10_template_uids', set()))
-            evidence['fresh_baseline'] = _baseline(users, templates)
+            evidence['baseline'] = _baseline(users, templates)
             occupied_uids = {int(user.uid) for user in users}
             occupied_badges = {_user_badge(user) for user in users if _user_badge(user)}
-            if uid in occupied_uids or badge in occupied_badges or uid in templates:
-                raise ValueError('requested candidate changed during preflight')
 
-            evidence['stage'] = 'write'
-            if not zk.wl10_set_user(uid=uid, user_id=badge, name=f'RE110-{uid}',
-                                     privilege=const.USER_DEFAULT, card=0):
-                raise RuntimeError('write rejected')
+            if not args.write_one:
+                candidate_uid = find_free_uid(occupied_uids, forbidden=templates)
+                candidate_badge = find_free_user_id(occupied_badges)
+                if candidate_uid is None or candidate_badge is None:
+                    raise ValueError('no free synthetic candidate')
+                evidence.update(outcome='success', stage='read-only',
+                                candidate={'uid': candidate_uid, 'user_id': candidate_badge})
+                print(f'[OK] read-only baseline; candidate uid={candidate_uid} badge={candidate_badge}; no write performed')
+                result = True
+            else:
+                if uid in occupied_uids or badge in occupied_badges or uid in templates:
+                    raise ValueError('requested candidate is occupied or reserved')
 
-            evidence['stage'] = 'readback'
-            readback = zk.wl10_get_users()
-            matches = [user for user in readback if _same_user(user, uid, badge)]
-            evidence['readback'] = {
-                'status': 'match' if len(matches) == 1 else 'mismatch',
-                'count': len(matches),
-                'hash': _baseline(readback, getattr(zk, '_wl10_template_uids', set()))['hash'],
-            }
-            if len(matches) != 1:
-                raise ValueError('readback mismatch')
-            evidence['outcome'] = 'success'
-            print(f'[OK] wrote and verified uid={uid} badge={badge}; residue left on device')
-            result = True
-    except Exception as exc:
-        evidence['error'] = type(exc).__name__
-        print(f'[FAIL] stage={evidence["stage"]} type={type(exc).__name__}')
-    finally:
-        try:
-            zk.disconnect()
-        except Exception:
-            evidence['disconnect'] = 'error'
-            result = False
-        if args.evidence_json:
+                evidence['stage'] = 'fresh-baseline'
+                users = zk.wl10_get_users()
+                templates = set(getattr(zk, '_wl10_template_uids', set()))
+                evidence['fresh_baseline'] = _baseline(users, templates)
+                occupied_uids = {int(user.uid) for user in users}
+                occupied_badges = {_user_badge(user) for user in users if _user_badge(user)}
+                if uid in occupied_uids or badge in occupied_badges or uid in templates:
+                    raise ValueError('requested candidate changed during preflight')
+
+                evidence['stage'] = 'write'
+                if not zk.wl10_set_user(uid=uid, user_id=badge, name=f'RE110-{uid}',
+                                         privilege=const.USER_DEFAULT, card=0):
+                    raise RuntimeError('write rejected')
+
+                evidence['stage'] = 'readback'
+                readback = zk.wl10_get_users()
+                matches = [user for user in readback if _same_user(user, uid, badge)]
+                evidence['readback'] = {
+                    'status': 'match' if len(matches) == 1 else 'mismatch',
+                    'count': len(matches),
+                    'hash': _baseline(readback, getattr(zk, '_wl10_template_uids', set()))['hash'],
+                }
+                if len(matches) != 1:
+                    raise ValueError('readback mismatch')
+                evidence['outcome'] = 'success'
+                print(f'[OK] wrote and verified uid={uid} badge={badge}; residue left on device')
+                result = True
+        except Exception as exc:
+            evidence['error'] = type(exc).__name__
+            print(f'[FAIL] stage={evidence["stage"]} type={type(exc).__name__}')
+        finally:
             try:
-                _write_evidence(args.evidence_json, evidence)
-            except OSError as exc:
-                print(f'[FAIL] evidence write type={type(exc).__name__}')
+                if zk is not None:
+                    zk.disconnect()
+            except Exception:
+                evidence['disconnect'] = 'error'
                 result = False
+            if args.evidence_json:
+                try:
+                    _write_evidence(args._evidence_parent_fd, args._evidence_basename, evidence)
+                except OSError as exc:
+                    print(f'[FAIL] evidence write type={type(exc).__name__}')
+                    result = False
+    finally:
+        if args.evidence_json:
+            os.close(args._evidence_parent_fd)
     return result
 
 def main(argv=None):
