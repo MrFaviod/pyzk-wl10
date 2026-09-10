@@ -54,25 +54,47 @@ def _same_user(user, uid, badge):
             int(user.privilege) == const.USER_DEFAULT and int(getattr(user, 'card', 0)) == 0)
 
 
+def _open_evidence_parent(path):
+    absolute = os.path.abspath(os.fspath(path))
+    components = absolute.split(os.sep)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    current_fd = os.open(os.sep, flags)
+    try:
+        for component in components[1:-1]:
+            next_fd = os.open(component, flags, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+    except Exception:
+        os.close(current_fd)
+        raise
+    return current_fd, components[-1]
+
+
 def _write_evidence(path, evidence):
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
-    fd = os.open(path, flags, 0o600)
+    parent_fd, basename = _open_evidence_parent(path)
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        fd = os.open(basename, flags, 0o600, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
     with os.fdopen(fd, 'w', encoding='utf-8') as stream:
         json.dump(evidence, stream, indent=2, sort_keys=True)
         stream.write('\n')
 
 
 def _preflight_evidence(path):
-    if os.path.lexists(path):
-        raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), path)
-    parent = os.path.dirname(os.path.abspath(path)) or os.curdir
-    flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0)
-    fd = os.open(parent, flags)
+    parent_fd, basename = _open_evidence_parent(path)
     try:
-        if not os.access(parent, os.W_OK | os.X_OK):
-            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), parent)
+        try:
+            os.stat(basename, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), path)
+        if not os.access('.', os.W_OK | os.X_OK, dir_fd=parent_fd):
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), path)
     finally:
-        os.close(fd)
+        os.close(parent_fd)
 
 
 def _parser():

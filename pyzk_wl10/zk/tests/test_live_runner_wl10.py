@@ -1,5 +1,6 @@
 """Offline safety contract tests for the WL10 live runner."""
 import importlib.util
+import os
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -203,6 +204,45 @@ def test_dangling_symlink_evidence_rejects_before_connection(monkeypatch, tmp_pa
     assert calls == []
     assert not target.exists()
     assert evidence.is_symlink()
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY") or
+                    os.open not in os.supports_dir_fd or os.stat not in os.supports_dir_fd,
+                    reason="requires O_NOFOLLOW, O_DIRECTORY, and dir_fd")
+def test_intermediate_symlink_evidence_rejects_before_connection(monkeypatch, tmp_path):
+    mod = _load_runner()
+    calls = []
+    monkeypatch.setattr(mod, "ZK", _fake_zk(calls, [[]]))
+    real_parent = tmp_path / "real"
+    (real_parent / "child").mkdir(parents=True)
+    symlink_parent = tmp_path / "link"
+    symlink_parent.symlink_to(real_parent, target_is_directory=True)
+    evidence = symlink_parent / "child" / "evidence.json"
+
+    assert mod.main(["10.0.0.2", "--write-one", "--uid", "8",
+                     "--user-id", "999950", "--evidence-json", str(evidence)]) == 2
+    assert calls == []
+    assert not (real_parent / "child" / "evidence.json").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY") or
+                    os.open not in os.supports_dir_fd or os.stat not in os.supports_dir_fd,
+                    reason="requires O_NOFOLLOW, O_DIRECTORY, and dir_fd")
+def test_parent_symlink_replacement_after_preflight_cannot_escape(tmp_path):
+    mod = _load_runner()
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    evidence = parent / "evidence.json"
+
+    mod._preflight_evidence(evidence)
+    moved = tmp_path / "moved"
+    parent.rename(moved)
+    parent.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        mod._write_evidence(evidence, {"outcome": "success"})
+    assert not (outside / "evidence.json").exists()
 
 
 def test_missing_parent_evidence_rejects_before_connection(monkeypatch, tmp_path):
