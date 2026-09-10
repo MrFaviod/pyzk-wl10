@@ -54,7 +54,7 @@ Deletion **persists** on tested devices (<DEVICE_IP>, <DEVICE_IP>).
         ├── base.py                # class ZK (2449 lines — the monolith)
         ├── const.py               # Protocol constants (CMD_*, WL10_*_SIZE, WL10_VERIFY_*)
         ├── user.py / attendance.py / finger.py / exception.py
-        └── tests/                 # 199 collected offline tests (see pyzk_wl10/zk/tests/AGENTS.md)
+        └── tests/                 # 208 collected offline tests (see pyzk_wl10/zk/tests/AGENTS.md)
 ```
 
 ## Key API — `zk.base.ZK`
@@ -99,8 +99,8 @@ zk.disconnect()
 ## Test Suite
 
 ```bash
-python3 -m pytest pyzk_wl10/zk/tests/ --collect-only -q  # 199 collected
-python3 -m pytest pyzk_wl10/zk/tests/ -q                 # 199 passed, offline
+python3 -m pytest pyzk_wl10/zk/tests/ --collect-only -q  # 208 collected
+python3 -m pytest pyzk_wl10/zk/tests/ -q                 # 208 passed, offline
 ```
 
 **HAZARD**: a bare `pytest` from the repo root also collects live-device
@@ -112,7 +112,7 @@ Test conventions: `pyzk_wl10/zk/tests/AGENTS.md`.
 
 All take a device IP and touch real hardware. Never run casually or in CI:
 - `wl10_probe_read.py IP --output-dir DIR [--timeout N --tcp-maxseg N --gap-timeout N]` — read-only raw capture; output directory is required and must not already exist
-- `test_runner_wl10.py IP [--write-one --uid UID --user-id BADGE --evidence-json FILE]` — read-only by default; `--write-one` permits exactly one explicit write and leaves residue; no delete/cleanup/retry
+- `test_runner_wl10.py IP [--write-one --uid UID --user-id BADGE --evidence-json FILE --read-gate-json FILE]` — read-only by default; `--write-one` permits exactly one explicit write and leaves residue; no delete/cleanup/retry
 - `listar_marcaciones.py IP [--since ... --csv --tcp-maxseg N --gap-timeout N]` — dump attendance
 - `wl10_probe_write.py IP --verbose` — legacy writes/deletes real users; prohibited unless separately authorized
 - `check_device.py` — Windows read-only diagnostic (users + attendance, ES labels)
@@ -134,9 +134,9 @@ All take a device IP and touch real hardware. Never run casually or in CI:
 
 | Mode | Supported operations | Evidence status |
 |---|---|---|
-| Offline | pytest collection and suite; fake-socket/parser/dispatch/runner/probe tests | **Validated**: 199 collected and 199 passed |
+| Offline | pytest collection and suite; fake-socket/parser/dispatch/runner/probe tests | **Validated**: 208 collected and 208 passed |
 | Read-only live | `wl10_probe_read.py` with a new output directory; `test_runner_wl10.py` default mode | **Implemented, not validated on <DEVICE_IP>**; Task 6 started but timed out before a summary |
-| One-write live | `test_runner_wl10.py --write-one --uid ... --user-id ... --evidence-json ...` | **Not validated**: Task 6 identity/completeness/parser/template/baseline gates failed; Task 7 was blocked |
+| One-write live | `test_runner_wl10.py --write-one --uid ... --user-id ... --evidence-json ... --read-gate-json ...` | **Not validated**: Task 6 identity/completeness/parser/template/baseline gates failed; Task 7 was blocked |
 | Prohibited | delete, reboot, power, time, clear, door, enable/disable; legacy mutation scripts | **Not exercised on <DEVICE_IP>** |
 | Unverified | any live operation lacking identity/completeness/parser/template/baseline evidence; raw packet capture without capability | **Unverified on <DEVICE_IP>**; no success inferred |
 
@@ -149,7 +149,7 @@ python3 -m pytest pyzk_wl10/zk/tests/ --collect-only -q
 python3 -m pytest pyzk_wl10/zk/tests/ -q
 python3 wl10_probe_read.py <DEVICE_IP> --output-dir /path/to/new-capture --timeout 20
 python3 test_runner_wl10.py <DEVICE_IP>                 # read-only default
-python3 test_runner_wl10.py <DEVICE_IP> --write-one --uid 8 --user-id 999950 --evidence-json /path/to/new-evidence.json  # explicit single write only after gates
+python3 test_runner_wl10.py <DEVICE_IP> --write-one --uid 8 --user-id 999950 --evidence-json /path/to/new-evidence.json --read-gate-json /path/to/read-gate.json  # explicit single write only after gates
 ```
 
 ## Contribution traceability

@@ -170,7 +170,7 @@ $ python3 listar_marcaciones.py <DEVICE_IP> --since 2026-07-01
 │       ├── exception.py
 │       ├── finger.py
 │       ├── user.py
-│       └── tests/          # 199 offline pytest tests
+│       └── tests/          # 208 offline pytest tests
 │           ├── conftest.py
 │           ├── helpers.py
 │           └── test_*.py
@@ -188,12 +188,16 @@ parser success, template set presence, and baseline consistency. It performs
 exactly one write and one readback; there is no retry, delete, reboot, or
 cleanup. Evidence records disconnect failure as failure.
 
+```bash
+python3 test_runner_wl10.py IP --write-one --uid 8 --user-id 999950 --evidence-json /path/to/new-evidence.json --read-gate-json /path/to/read-gate.json
+```
+
 Task 6 did not validate the target device, so no write was performed and no
 live success is inferred.
 ## Offline verification
 
 ```bash
-python3 -m pytest pyzk_wl10/zk/tests/ --collect-only -q  # 199 collected
+python3 -m pytest pyzk_wl10/zk/tests/ --collect-only -q  # 208 collected
 python3 -m pytest pyzk_wl10/zk/tests/ -q                 # offline suite
 python3 wl10_probe_read.py --help
 python3 test_runner_wl10.py --help
@@ -213,11 +217,11 @@ python3 test_runner_wl10.py --help
   "linking" records that the firmware emits in addition to the regular
   user records.
 * **Added** `_decode_zk_time` (a public alias of `__decode_time` that the WL10 parser can call without name-mangling).
-* **Added** 10 unit tests for the new write/delete methods; the offline suite now contains 199 tests.
+* **Added** 10 unit tests for the new write/delete methods; at that point, the offline suite contained 199 tests.
 * **Updated** `const.WL10_ATT_RECORD_SIZE` from `28` to `22`.
 * **Added** `wl10_set_user` and `wl10_delete_user` — the write path
   reverse-engineered from the AK3750 firmware.  CMD=8 (USER_WRQ) with
   72-byte payload writes the user; CMD=18 (DELETE_USER) deletes it
   (persistence depends on FW version).
 * **Added** 10 unit tests for the new write/delete methods, bringing
-  the total to 49 tests.
+  the historical total at that point to 49 tests.
