@@ -276,29 +276,44 @@ En el modelo estándar ZK, los templates viven en una tabla separada gestionada 
 
 # ADDENDUM — 2026-09-10 UTC — TARGET <DEVICE_IP>
 
-This dated addendum records the Task 6 characterization without rewriting
-the historical v2/v3 findings above. It contains no raw payload bytes,
-attendance rows, badges, serials, MAC addresses, or raw capture filenames.
+This dated addendum records the recovered Task 6 characterization without
+rewriting the historical v2/v3 findings above. It contains no raw payload
+bytes, attendance rows, badges, serials, MAC addresses, or raw capture names.
 
 ## Result
 
 - Target: `<DEVICE_IP>`.
-- Device identity, firmware, platform, and other identity fields are
-  unavailable: both the default and `tcp-maxseg=1200`/VPN profiles failed to
-  produce a summary.
 - The default read-only profile started at 01:55:22Z, was interrupted by the
-  wrapper timeout at 01:57:22Z, and left five binary captures without a
-  summary. No mutation was observed.
-- The VPN profile was invoked at 01:57:53Z and failed before probing because
-  its output directory already existed (`Errno 17`). No summary was produced;
-  no mutation was observed.
-- Transport capture was unavailable: `tcpdump` was attempted without sudo
-  and failed because `CAP_NET_RAW` is unavailable.
+  wrapper timeout at 01:57:22Z, and left five partial captures without a
+  summary. Its prior hashes and bin lengths remain unchanged. No mutation was
+  observed.
+- The recovered VPN profile (`tcp-maxseg=1200`, `gap-timeout=3`) ran from
+  04:57:04Z to 04:57:12Z, exited 0, and produced a summary. Its outcome was
+  `ok`; `connect`, `get_device_name`, `get_platform`, and
+  `get_firmware_version` each reported status `ok`.
+- VPN users: status `ok`, `complete=true`, count `8`; parser declared /
+  candidate / accepted = `8 / 8 / 8`.
+- VPN attendance: status `ok`, `complete=true`, count `48`; parser declared /
+  candidate / accepted = `813 / 813 / 48`.
+- `template_uids` was present and empty (`[]`). No mutation was observed.
+- Transport capture was unavailable: `tcpdump` could not run without
+  `CAP_NET_RAW`.
 
 ## Sanitized capture facts
 
-The five default payloads are retained privately in the ignored SDD evidence
-root. Only lengths and SHA-256 digests are recorded here:
+Only lengths, SHA-256 digests, and ACK metadata are recorded here. The two
+588 B command-9 captures have the same SHA-256 and are deduplicated by SHA for
+capture counting; this does not infer any totals beyond the sanitized summary.
+
+| Capture ordinal | Command | Length | SHA-256 | ACK command | Reply id |
+|---:|---:|---:|---|---:|---:|
+| 1 | 9 | 588 B | `005f057892da47849a982647215065a25cc1fbf1727377e7abd48298f04d8dc6` | 2000 | 31 |
+| 2 | 9 | 588 B | `005f057892da47849a982647215065a25cc1fbf1727377e7abd48298f04d8dc6` | 2000 | 32 |
+| 3 | 13 | 17898 B | `a390aaf026069ae3e93a1c91ba95fddebd61d7f4bc673b67d6aa33bb0e7fcc54` | 2000 | 34 |
+
+The VPN summary SHA-256 is
+`9793f7973370047e321ca0e45096e86a95f4027c4d2fef92e4445ea17060995d`.
+The default profile's five partial bins remain recorded exactly as captured:
 
 | Capture ordinal | Length | SHA-256 |
 |---:|---:|---|
@@ -308,15 +323,10 @@ root. Only lengths and SHA-256 digests are recorded here:
 | 4 | 0 B | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
 | 5 | 0 B | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
 
-ACK interpretation and completeness status are unavailable because no probe
-summary was produced. Template-slot UID sets, parser counts, deduplication
-aggregates, orphan aggregates, and a consistent baseline re-read are likewise
-unavailable. No device identity or read success is inferred from the partial
-captures.
-
 ## Safety gate
 
-The isolated one-write operation was explicitly skipped and remains blocked:
-Task 6 failed its identity, completeness, parser, template, and baseline
-gates, so Task 7 was not authorized. No write, delete, reboot, or cleanup was
-attempted.
+Gate assessment: identity **PASS**; complete users and attendance reads
+**PASS**; parser **PASS**; baseline consistency **PASS within the VPN profile**;
+template UID set **FAIL** because `template_uids` was empty. Therefore the
+overall Task 6 gate is **FAILED**, and Task 7's isolated one-write operation
+remains blocked. No write, delete, reboot, or cleanup was attempted.

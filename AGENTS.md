@@ -135,10 +135,12 @@ All take a device IP and touch real hardware. Never run casually or in CI:
 | Mode | Supported operations | Evidence status |
 |---|---|---|
 | Offline | pytest collection and suite; fake-socket/parser/dispatch/runner/probe tests | **Validated**: 208 collected and 208 passed |
-| Read-only live | `wl10_probe_read.py` with a new output directory; `test_runner_wl10.py` default mode | **Implemented, not validated on <DEVICE_IP>**; Task 6 started but timed out before a summary |
-| One-write live | `test_runner_wl10.py --write-one --uid ... --user-id ... --evidence-json ... --read-gate-json ...` | **Not validated**: Task 6 identity/completeness/parser/template/baseline gates failed; Task 7 was blocked |
+| Read-only live | `wl10_probe_read.py` with a new output directory; `test_runner_wl10.py` default mode | **Partially characterized on <DEVICE_IP>**: the VPN profile completed with a summary and complete users/attendance reads, but `template_uids` was empty, so the template gate failed; not certified |
+| One-write live | `test_runner_wl10.py --write-one --uid ... --user-id ... --evidence-json ... --read-gate-json ...` | **Not validated**: Task 6 overall gate FAILED; Task 7 remains blocked |
 | Prohibited | delete, reboot, power, time, clear, door, enable/disable; legacy mutation scripts | **Not exercised on <DEVICE_IP>** |
-| Unverified | any live operation lacking identity/completeness/parser/template/baseline evidence; raw packet capture without capability | **Unverified on <DEVICE_IP>**; no success inferred |
+| Unverified | any live operation lacking identity/completeness/parser/template/baseline evidence; raw packet capture without capability | **Unverified on <DEVICE_IP>**; the successful VPN read-only capture is not certified because the template gate failed |
+
+Task 6 status (2026-09-10): the default profile remains incomplete after the wrapper timeout, with no summary; the VPN profile succeeded with a summary and complete users/attendance reads. Identity, complete reads, parser, and baseline consistency within the VPN profile passed; the empty `template_uids` set failed its gate. Overall Task 6 remains FAILED, and Task 7 write remains blocked.
 
 No destructive operation was exercised on `<DEVICE_IP>`; no write was performed.
 
