@@ -13,6 +13,17 @@ import zk.base as base_module
 from zk.base import ZK
 
 
+def test_ping_uses_argv_without_shell(monkeypatch):
+    import subprocess
+
+    seen = {}
+    monkeypatch.setattr(subprocess, 'call', lambda args, **kwargs: seen.update(args=args, kwargs=kwargs) or 0)
+    zk = _build_zk()
+    zk.helper = base_module.ZK_helper('127.0.0.1;echo pwned')
+    assert zk.helper.test_ping() is True
+    assert seen['args'] == ['ping', '-c', '1', '-W', '5', '127.0.0.1;echo pwned']
+    assert seen['kwargs']['shell'] is False
+
 def _build_zk(tcp_maxseg=None, force_udp=False):
     inst = object.__new__(ZK)
     inst.tcp = not force_udp

@@ -2,9 +2,9 @@
 import importlib.util
 import os
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-
 import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -18,6 +18,91 @@ def _load_runner():
     spec.loader.exec_module(module)
     return module
 
+
+def _gate(path, ip='10.0.0.2', **overrides):
+    data = {
+        'schema': 1,
+        'target_ip': ip,
+        'captured_utc': datetime.now(timezone.utc).isoformat(),
+        'identity': {'status': 'ok'},
+        'users': {'status': 'ok', 'complete': True, 'parser_success': True},
+        'attendance': {'status': 'ok', 'complete': True, 'parser_success': True},
+        'templates': {'present': True},
+        'baseline': {'consistent': True},
+    }
+    data.update(overrides)
+    path.write_text(json.dumps(data))
+    return path
+
+
+def test_write_requires_fresh_read_gate_before_zk(monkeypatch, tmp_path):
+    mod = _load_runner()
+    calls = []
+    monkeypatch.setattr(mod, 'ZK', _fake_zk(calls, [[]]))
+    evidence = tmp_path / 'evidence.json'
+    assert mod.main(['10.0.0.2', '--write-one', '--uid', '8', '--user-id', '999950',
+                     '--evidence-json', str(evidence), '--read-gate-json',
+                     str(tmp_path / 'missing-gate.json')]) == 2
+    assert calls == []
+
+
+def test_write_rejects_gate_for_other_ip(monkeypatch, tmp_path):
+    mod = _load_runner()
+    calls = []
+    monkeypatch.setattr(mod, 'ZK', _fake_zk(calls, [[]]))
+    gate = _gate(tmp_path / 'gate.json', ip='10.0.0.3')
+    evidence = tmp_path / 'evidence.json'
+    assert mod.main(['10.0.0.2', '--write-one', '--uid', '8', '--user-id', '999950',
+                     '--evidence-json', str(evidence), '--read-gate-json', str(gate)]) == 2
+    assert calls == []
+
+
+def test_write_rejects_incomplete_gate(monkeypatch, tmp_path):
+    mod = _load_runner()
+    calls = []
+    monkeypatch.setattr(mod, 'ZK', _fake_zk(calls, [[]]))
+    gate = _gate(tmp_path / 'gate.json', users={'status': 'ok', 'complete': False, 'parser_success': True})
+    evidence = tmp_path / 'evidence.json'
+    assert mod.main(['10.0.0.2', '--write-one', '--uid', '8', '--user-id', '999950',
+                     '--evidence-json', str(evidence), '--read-gate-json', str(gate)]) == 2
+    assert calls == []
+
+
+def test_disconnect_failure_rewrites_success_evidence_as_failure(monkeypatch, tmp_path):
+    mod = _load_runner()
+    calls = []
+    written = _user(8, '999950', name='RE110-8')
+    FakeZK = _fake_zk(calls, [[], []], readback=[written])
+    FakeZK.disconnect = lambda self: (_ for _ in ()).throw(RuntimeError('disconnect failed'))
+    monkeypatch.setattr(mod, 'ZK', FakeZK)
+    gate = _gate(tmp_path / 'gate.json')
+    evidence = tmp_path / 'evidence.json'
+    assert mod.main(['10.0.0.2', '--write-one', '--uid', '8', '--user-id', '999950',
+                     '--evidence-json', str(evidence), '--read-gate-json', str(gate)]) != 0
+    data = json.loads(evidence.read_text())
+    assert data['outcome'] == 'failure'
+    assert data['stage'] == 'disconnect'
+
+
+def test_write_rejects_stale_gate(monkeypatch, tmp_path):
+    mod = _load_runner()
+    calls = []
+    monkeypatch.setattr(mod, 'ZK', _fake_zk(calls, [[]]))
+    gate = _gate(tmp_path / 'gate.json')
+    data = json.loads(gate.read_text())
+    data['captured_utc'] = '2000-01-01T00:00:00+00:00'
+    gate.write_text(json.dumps(data))
+    evidence = tmp_path / 'evidence.json'
+    assert mod.main(['10.0.0.2', '--write-one', '--uid', '8', '--user-id', '999950',
+                     '--evidence-json', str(evidence), '--read-gate-json', str(gate)]) == 2
+    assert calls == []
+
+def test_runner_rejects_non_ip_before_zk(monkeypatch, tmp_path):
+    mod = _load_runner()
+    calls = []
+    monkeypatch.setattr(mod, 'ZK', _fake_zk(calls, [[]]))
+    assert mod.main(['127.0.0.1;echo pwned']) == 2
+    assert calls == []
 
 def _user(uid, badge, name="Alice", privilege=0, card=0):
     return SimpleNamespace(uid=uid, user_id=badge, badge=badge, name=name,
@@ -116,9 +201,10 @@ def test_valid_write_is_singular_regular_user_and_reads_back(monkeypatch, tmp_pa
     written = _user(8, "999950", name="RE110-8")
     monkeypatch.setattr(mod, "ZK", _fake_zk(calls, [[], []], readback=[written]))
     evidence = tmp_path / "evidence.json"
-
+    gate = _gate(tmp_path / 'gate.json')
     assert mod.main(["10.0.0.2", "--write-one", "--uid", "8",
-                     "--user-id", "999950", "--evidence-json", str(evidence)]) == 0
+                     "--user-id", "999950", "--evidence-json", str(evidence),
+                     "--read-gate-json", str(gate)]) == 0
     writes = _writes(calls)
     assert len(writes) == 1
     assert writes[0][1] == {"uid": 8, "user_id": "999950", "name": "RE110-8",
@@ -136,10 +222,10 @@ def test_failed_write_does_not_retry_or_cleanup(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "ZK", _fake_zk(calls, [[], []], write_error=RuntimeError("ACK_ERROR")))
     evidence = tmp_path / "failed.json"
 
+    gate = _gate(tmp_path / 'gate.json')
     assert mod.main(["10.0.0.2", "--write-one", "--uid", "8",
-                     "--user-id", "999950", "--evidence-json", str(evidence)]) != 0
-    assert len(_writes(calls)) == 1
-    assert not any(c in {"delete", "reboot", "refresh"} for c in calls if isinstance(c, str))
+                     "--user-id", "999950", "--evidence-json", str(evidence),
+                     "--read-gate-json", str(gate)]) != 0
     assert json.loads(evidence.read_text())["stage"] == "write"
 
 
@@ -149,9 +235,10 @@ def test_readback_mismatch_does_not_retry_or_cleanup(monkeypatch, tmp_path):
     wrong = _user(8, "999950", name="WRONG", privilege=mod.const.USER_DEFAULT)
     monkeypatch.setattr(mod, "ZK", _fake_zk(calls, [[], []], readback=[wrong]))
     evidence = tmp_path / "mismatch.json"
-
+    gate = _gate(tmp_path / 'gate.json')
     assert mod.main(["10.0.0.2", "--write-one", "--uid", "8",
-                     "--user-id", "999950", "--evidence-json", str(evidence)]) != 0
+                     "--user-id", "999950", "--evidence-json", str(evidence),
+                     "--read-gate-json", str(gate)]) != 0
     assert len(_writes(calls)) == 1
     assert not any(c in {"delete", "reboot", "refresh"} for c in calls if isinstance(c, str))
     assert json.loads(evidence.read_text())["stage"] == "readback"

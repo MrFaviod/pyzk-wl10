@@ -101,14 +101,12 @@ simple ACK (CMD_ACK_OK=2000) — no buffered write sequence is needed.
 | Operation      | Command              | Payload           | Response               | Status     |
 |----------------|----------------------|-------------------|------------------------|------------|
 | Write user     | CMD=8 (USER_WRQ)     | 72-byte record    | ACK_OK=2000            | **New**    |
-| Delete user    | CMD=18 (DELETE_USER) | `pack('<h', uid)` | ACK_OK=2000​¹           | **New**    |
-| Bulk read      | CMD=9 (USERTEMP_RRQ) | (empty)           | PREPARE_DATA=1500+N*72 | Existing   |
-| Housekeeping   | CMD=1013 REFRESHDATA | (empty)           | ACK_OK                 | Existing   |
+| Delete user    | CMD=18 (DELETE_USER) | `pack('<H', uid)` | ACK_OK=2000 | **New** |
+| Bulk read      | CMD=9 (USERTEMP_RRQ) | (empty) | PREPARE_DATA=1500+N*72 | Existing |
+| Housekeeping   | CMD=1013 REFRESHDATA | (empty) | ACK_OK | Existing |
 
-¹ Deletion is confirmed to return ACK_OK on the AK3750, but does **not**
-persist to flash on the tested firmware (Ver 6.60).  The `wl10_delete_user`
-method is provided for firmware versions where it works; on this one it
-will return ``True`` while leaving the user on the device.
+Deletion is confirmed to return ACK_OK on the AK3750, but persistence depends on
+firmware. The method is not part of the read-only probe or safe runner.
 
 Writes (and the existing bulk reads) go through the raw TCP path rather
 than `__send_command`, because the standard buffered protocol does not
@@ -161,7 +159,8 @@ $ python3 listar_marcaciones.py <DEVICE_IP> --since 2026-07-01
 ```
 .
 ├── listar_marcaciones.py   # CLI tool to dump attendance records
-├── wl10_probe_write.py     # Interactive probe for the write protocol
+├── wl10_probe_read.py      # read-only raw capture; new output dir required
+├── test_runner_wl10.py     # read-only default; write requires a fresh read gate
 ├── pyzk_wl10/              # the library
 │   └── zk/
 │       ├── __init__.py
@@ -171,12 +170,34 @@ $ python3 listar_marcaciones.py <DEVICE_IP> --since 2026-07-01
 │       ├── exception.py
 │       ├── finger.py
 │       ├── user.py
-│       └── tests/          # 49 pytest tests
+│       └── tests/          # 199 offline pytest tests
 │           ├── conftest.py
 │           ├── helpers.py
 │           └── test_*.py
 ```
+## Safe operation contract
 
+`wl10_probe_read.py IP --output-dir DIR` is read-only and requires a new
+output directory. It binds captures and `summary.json` to an opened directory
+fd and refuses symlinked or replaced parents.
+
+`test_runner_wl10.py IP` is read-only by default. `--write-one` requires one
+literal IP, explicit UID and badge, a collision-safe `--evidence-json`, and a
+fresh `--read-gate-json` proving identity, complete users and attendance,
+parser success, template set presence, and baseline consistency. It performs
+exactly one write and one readback; there is no retry, delete, reboot, or
+cleanup. Evidence records disconnect failure as failure.
+
+Task 6 did not validate the target device, so no write was performed and no
+live success is inferred.
+## Offline verification
+
+```bash
+python3 -m pytest pyzk_wl10/zk/tests/ --collect-only -q  # 199 collected
+python3 -m pytest pyzk_wl10/zk/tests/ -q                 # offline suite
+python3 wl10_probe_read.py --help
+python3 test_runner_wl10.py --help
+```
 ## Changelog vs the original fork
 
 * **Replaced** the "guess-the-format-by-trying-six-candidates" parser
@@ -191,11 +212,8 @@ $ python3 listar_marcaciones.py <DEVICE_IP> --since 2026-07-01
 * **Added** `_wl10_scan_user_id` to recover the badge number from
   "linking" records that the firmware emits in addition to the regular
   user records.
-* **Added** `_decode_zk_time` (a public alias of `__decode_time` that
-  the WL10 parser can call without name-mangling).
-* **Removed** the 14 `debug_*.py` and `test_wl10.py` scripts that
-  contained the failed reverse-engineering attempts — the bugs they
-  were chasing are now fixed.
+* **Added** `_decode_zk_time` (a public alias of `__decode_time` that the WL10 parser can call without name-mangling).
+* **Added** 10 unit tests for the new write/delete methods; the offline suite now contains 199 tests.
 * **Updated** `const.WL10_ATT_RECORD_SIZE` from `28` to `22`.
 * **Added** `wl10_set_user` and `wl10_delete_user` — the write path
   reverse-engineered from the AK3750 firmware.  CMD=8 (USER_WRQ) with

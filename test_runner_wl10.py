@@ -3,10 +3,12 @@
 import argparse
 import errno
 import hashlib
+import ipaddress
 import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pyzk_wl10'))
 
@@ -93,6 +95,32 @@ def _preflight_evidence(path):
         os.close(parent_fd)
         raise
     return parent_fd, basename
+def _load_read_gate(path, target_ip):
+    try:
+        with open(path, encoding='utf-8') as stream:
+            gate = json.load(stream)
+        captured = datetime.fromisoformat(gate['captured_utc'])
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise ValueError(f'invalid --read-gate-json: {exc}') from exc
+    age = (datetime.now(timezone.utc) - captured.astimezone(timezone.utc)).total_seconds()
+    if gate.get('schema') != 1 or gate.get('target_ip') != target_ip:
+        raise ValueError('read gate target/schema mismatch')
+    if age < 0 or age > 3600:
+        raise ValueError('read gate is stale')
+    required = (
+        gate.get('identity', {}).get('status') == 'ok',
+        gate.get('users', {}).get('status') == 'ok',
+        gate.get('users', {}).get('complete') is True,
+        gate.get('users', {}).get('parser_success') is True,
+        gate.get('attendance', {}).get('status') == 'ok',
+        gate.get('attendance', {}).get('complete') is True,
+        gate.get('attendance', {}).get('parser_success') is True,
+        gate.get('templates', {}).get('present') is True,
+        gate.get('baseline', {}).get('consistent') is True,
+    )
+    if not all(required):
+        raise ValueError('read gate does not prove complete successful baseline')
+    return gate
 
 
 def _parser():
@@ -105,31 +133,37 @@ def _parser():
     parser.add_argument('--uid', help='explicit UID (7..1000), required with --write-one')
     parser.add_argument('--user-id', help='explicit six-digit badge (999950..999999), required with --write-one')
     parser.add_argument('--evidence-json', help='sanitized evidence path; required with --write-one, never overwritten')
+    parser.add_argument('--read-gate-json', help='Task-6 success authorization; required with --write-one')
     return parser
 
 
 def _validate_args(args):
+    for ip in args.ips:
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError as exc:
+            raise ValueError('--ips must contain literal IP addresses') from exc
     if not args.write_one and args.evidence_json:
         raise ValueError('--evidence-json requires --write-one')
-    if not args.write_one and any(value is not None for value in (args.uid, args.user_id)):
-        raise ValueError('--uid and --user-id require --write-one')
+    if not args.write_one and any(value is not None for value in (args.uid, args.user_id, args.read_gate_json)):
+        raise ValueError('--uid, --user-id, and --read-gate-json require --write-one')
     if args.write_one:
         if len(args.ips) != 1:
             raise ValueError('--write-one requires exactly one IP')
         missing = [name for name, value in (('--uid', args.uid), ('--user-id', args.user_id),
-                                              ('--evidence-json', args.evidence_json)) if not value]
+                                              ('--evidence-json', args.evidence_json),
+                                              ('--read-gate-json', args.read_gate_json)) if not value]
         if missing:
             raise ValueError('write mode requires ' + ', '.join(missing))
         if not _valid_uid(args.uid):
             raise ValueError('--uid must be 7..1000')
         if not _valid_badge(args.user_id):
             raise ValueError('--user-id must be a six-digit badge in 999950..999999')
+        args._read_gate = _load_read_gate(args.read_gate_json, args.ips[0])
         try:
-            args._evidence_parent_fd, args._evidence_basename = _preflight_evidence(
-                args.evidence_json)
+            args._evidence_parent_fd, args._evidence_basename = _preflight_evidence(args.evidence_json)
         except OSError as exc:
             raise ValueError(f'--evidence-json unavailable: {exc.strerror}') from exc
-
 
 def _run_one(ip, args):
     uid = int(args.uid) if args.uid else None
@@ -196,8 +230,11 @@ def _run_one(ip, args):
             try:
                 if zk is not None:
                     zk.disconnect()
-            except Exception:
+            except Exception as exc:
                 evidence['disconnect'] = 'error'
+                evidence['error'] = type(exc).__name__
+                evidence['outcome'] = 'failure'
+                evidence['stage'] = 'disconnect'
                 result = False
             if args.evidence_json:
                 try:

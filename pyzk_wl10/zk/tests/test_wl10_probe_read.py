@@ -2,6 +2,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -357,3 +358,28 @@ def test_summary_contains_real_parser_counts(monkeypatch, tmp_path):
     summary = json.loads((out / "summary.json").read_text())
     assert summary["users"]["parser_counts"] == {"declared": 4, "candidate": 3, "accepted": 2}
     assert summary["attendance"]["parser_counts"] == {"declared": 8, "candidate": 3, "accepted": 3}
+def test_capture_writes_remain_bound_to_original_directory_after_replacement(tmp_path):
+    mod = _load_probe()
+    original = tmp_path / 'capture'
+    original.mkdir()
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    fd = os.open(original, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    moved = tmp_path / 'moved'
+    original.rename(moved)
+    original.symlink_to(outside, target_is_directory=True)
+    try:
+        mod._write_exclusive(fd, 'capture.bin', b'keep-local')
+    finally:
+        os.close(fd)
+    assert (moved / 'capture.bin').read_bytes() == b'keep-local'
+    assert not (outside / 'capture.bin').exists()
+
+
+def test_probe_summary_writes_new_directory(monkeypatch, tmp_path):
+    mod = _load_probe()
+    calls = []
+    monkeypatch.setattr(mod, 'CapturingZK', _fake_class(calls))
+    out = tmp_path / 'capture'
+    assert mod.main(['10.0.0.2', '--output-dir', str(out)]) == 0
+    assert (out / 'summary.json').exists()

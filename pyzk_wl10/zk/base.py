@@ -59,13 +59,12 @@ class ZK_helper:
     def test_ping(self):
         import platform  # noqa: PLC0415  # lazy import: only needed for ping
         import subprocess  # noqa: PLC0415  # lazy import: only needed for ping
-        ping_str = "-n 1" if platform.system().lower() == "windows" else "-c 1 -W 5"
-        args = "ping " + " " + ping_str + " " + self.ip
-        need_sh = platform.system().lower() != "windows"
-        return subprocess.call(args,  # noqa: S603  # ip comes from the caller's own config, not untrusted input
-                               stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE,
-                               shell=need_sh) == 0
+        if platform.system().lower() == "windows":
+            args = ["ping", "-n", "1", self.ip]
+        else:
+            args = ["ping", "-c", "1", "-W", "5", self.ip]
+        return subprocess.call(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               shell=False) == 0
 
     def test_tcp(self):
         self.client = socket(AF_INET, SOCK_STREAM)
