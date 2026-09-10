@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from unittest.mock import MagicMock
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "wl10_probe_read.py"
@@ -259,6 +260,32 @@ def test_real_capturing_client_fails_closed_on_mutation_helpers(monkeypatch, tmp
     ):
         with pytest.raises(Exception, match="not allowed"):
             invoke()
+    assert sent == []
+
+
+def test_real_wl10_capturing_client_blocks_raw_mutations_before_socket_send(monkeypatch, tmp_path):
+    mod = _load_probe()
+    zk = mod.CapturingZK("127.0.0.1", wl10=True, ommit_ping=True, capture_dir=tmp_path)
+    sent = []
+    sock = MagicMock()
+    sock.send.side_effect = lambda payload: sent.append(payload)
+    sock.recv.return_value = b""
+    monkeypatch.setattr(zk, "_ZK__sock", sock)
+
+    for invoke in (
+        lambda: zk.wl10_set_user(uid=1, user_id="1"),
+        lambda: zk.wl10_delete_user(uid=1),
+        zk.wl10_reboot,
+        lambda: zk.set_user(uid=1, user_id="1"),
+        lambda: zk.delete_user(uid=1),
+        zk.restart,
+        zk._wl10_refresh_data,
+        zk._wl10_read_ack,
+        zk.refresh_data,
+    ):
+        with pytest.raises(mod.ZKErrorResponse, match="not allowed"):
+            invoke()
+
     assert sent == []
 
 def test_symlinked_output_and_evidence_targets_are_not_overwritten(monkeypatch, tmp_path):

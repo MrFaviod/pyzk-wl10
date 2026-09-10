@@ -79,6 +79,24 @@ class CapturingZK(ZK):
             raise ZKErrorResponse(f"command {command} not allowed in read-only probe")
         return super()._ZK__send_command(command, command_string, response_size)
 
+    def wl10_set_user(self, *args, **kwargs):
+        raise ZKErrorResponse('not allowed in read-only probe')
+
+    def wl10_delete_user(self, *args, **kwargs):
+        raise ZKErrorResponse('not allowed in read-only probe')
+
+    def wl10_reboot(self, *args, **kwargs):
+        raise ZKErrorResponse('not allowed in read-only probe')
+
+    def _wl10_refresh_data(self, *args, **kwargs):
+        raise ZKErrorResponse('not allowed in read-only probe')
+
+    def _wl10_read_ack(self, *args, **kwargs):
+        raise ZKErrorResponse('not allowed in read-only probe')
+
+    def refresh_data(self, *args, **kwargs):
+        raise ZKErrorResponse('not allowed in read-only probe')
+
     def _wl10_read_raw_command(self, command_code):
         if command_code not in _ALLOWED_RAW:
             raise ZKErrorResponse(f"command {command_code} not allowed in read-only probe")
