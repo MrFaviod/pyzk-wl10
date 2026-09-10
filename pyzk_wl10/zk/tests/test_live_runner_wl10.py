@@ -168,6 +168,53 @@ def test_evidence_collision_is_rejected_without_connection(monkeypatch, tmp_path
     assert calls == []
     assert evidence.read_text() == "keep"
 
+def test_write_one_rejects_multiple_ips_before_connection(monkeypatch, tmp_path):
+    mod = _load_runner()
+    calls = []
+    monkeypatch.setattr(mod, "ZK", _fake_zk(calls, [[]]))
+    evidence = tmp_path / "multi.json"
+
+    assert mod.main(["10.0.0.2", "10.0.0.3", "--write-one", "--uid", "8",
+                     "--user-id", "999950", "--evidence-json", str(evidence)]) == 2
+    assert calls == []
+
+
+def test_default_evidence_path_rejects_before_connection(monkeypatch, tmp_path):
+    mod = _load_runner()
+    calls = []
+    monkeypatch.setattr(mod, "ZK", _fake_zk(calls, [[]]))
+    evidence = tmp_path / "default.json"
+
+    assert mod.main(["10.0.0.2", "--evidence-json", str(evidence)]) == 2
+    assert calls == []
+    assert not evidence.exists()
+
+
+def test_dangling_symlink_evidence_rejects_before_connection(monkeypatch, tmp_path):
+    mod = _load_runner()
+    calls = []
+    monkeypatch.setattr(mod, "ZK", _fake_zk(calls, [[]]))
+    target = tmp_path / "missing-target.json"
+    evidence = tmp_path / "dangling.json"
+    evidence.symlink_to(target)
+
+    assert mod.main(["10.0.0.2", "--write-one", "--uid", "8",
+                     "--user-id", "999950", "--evidence-json", str(evidence)]) == 2
+    assert calls == []
+    assert not target.exists()
+    assert evidence.is_symlink()
+
+
+def test_missing_parent_evidence_rejects_before_connection(monkeypatch, tmp_path):
+    mod = _load_runner()
+    calls = []
+    monkeypatch.setattr(mod, "ZK", _fake_zk(calls, [[]]))
+    evidence = tmp_path / "missing-parent" / "evidence.json"
+
+    assert mod.main(["10.0.0.2", "--write-one", "--uid", "8",
+                     "--user-id", "999950", "--evidence-json", str(evidence)]) == 2
+    assert calls == []
+    assert not evidence.parent.exists()
 
 def test_help_documents_safe_contract(capsys):
     mod = _load_runner()

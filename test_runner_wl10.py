@@ -6,7 +6,6 @@ import json
 import os
 import re
 import sys
-from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pyzk_wl10'))
 
@@ -66,6 +65,17 @@ def _write_evidence(path, evidence):
         except OSError:
             pass
         raise
+def _preflight_evidence(path):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.close(fd)
+    except Exception:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    os.unlink(path)
 
 
 def _parser():
@@ -82,9 +92,13 @@ def _parser():
 
 
 def _validate_args(args):
+    if not args.write_one and args.evidence_json:
+        raise ValueError('--evidence-json requires --write-one')
     if not args.write_one and any(value is not None for value in (args.uid, args.user_id)):
         raise ValueError('--uid and --user-id require --write-one')
     if args.write_one:
+        if len(args.ips) != 1:
+            raise ValueError('--write-one requires exactly one IP')
         missing = [name for name, value in (('--uid', args.uid), ('--user-id', args.user_id),
                                               ('--evidence-json', args.evidence_json)) if not value]
         if missing:
@@ -93,8 +107,10 @@ def _validate_args(args):
             raise ValueError('--uid must be 7..1000')
         if not _valid_badge(args.user_id):
             raise ValueError('--user-id must be a six-digit badge in 999950..999999')
-    if args.write_one and Path(args.evidence_json).exists():
-        raise ValueError('--evidence-json already exists')
+        try:
+            _preflight_evidence(args.evidence_json)
+        except OSError as exc:
+            raise ValueError(f'--evidence-json unavailable: {exc.strerror}') from exc
 
 
 def _run_one(ip, args):
