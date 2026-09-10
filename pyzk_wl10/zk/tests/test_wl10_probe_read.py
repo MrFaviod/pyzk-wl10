@@ -220,7 +220,7 @@ def test_invalid_ip_rejected_before_construction(monkeypatch, tmp_path):
     assert not out.exists()
 
 
-def test_real_capturing_client_fails_closed_on_forbidden_command(monkeypatch, tmp_path):
+def test_real_capturing_client_allows_read_housekeeping(monkeypatch, tmp_path):
     mod = _load_probe()
     zk = mod.CapturingZK("127.0.0.1", wl10=True, ommit_ping=True, capture_dir=tmp_path)
     sent = []
@@ -230,12 +230,36 @@ def test_real_capturing_client_fails_closed_on_forbidden_command(monkeypatch, tm
         return {"status": True, "code": mod.const.CMD_ACK_OK}
 
     monkeypatch.setattr(mod.ZK, "_ZK__send_command", fake_send)
-    with pytest.raises(Exception, match="not allowed"):
-        zk.free_data()
-    assert sent == []
-    assert zk._ZK__send_command(mod.const.CMD_OPTIONS_RRQ)["status"] is True
-    assert sent == [mod.const.CMD_OPTIONS_RRQ]
+    assert zk.free_data() is True
+    zk._clear_error()
+    assert sent == [
+        mod.const.CMD_FREE_DATA,
+        mod.const.CMD_ACK_ERROR,
+        mod.const.CMD_ACK_UNKNOWN,
+        mod.const.CMD_ACK_UNKNOWN,
+        mod.const.CMD_ACK_UNKNOWN,
+    ]
 
+
+def test_real_capturing_client_fails_closed_on_mutation_helpers(monkeypatch, tmp_path):
+    mod = _load_probe()
+    zk = mod.CapturingZK("127.0.0.1", wl10=False, ommit_ping=True, capture_dir=tmp_path)
+    sent = []
+
+    def fake_send(self, command, command_string=b"", response_size=8):
+        sent.append(command)
+        return {"status": True, "code": mod.const.CMD_ACK_OK}
+
+    monkeypatch.setattr(mod.ZK, "_ZK__send_command", fake_send)
+    for invoke in (
+        lambda: zk.set_user(uid=1, user_id="1"),
+        lambda: zk.delete_user(uid=1),
+        zk.clear_data,
+        zk.restart,
+    ):
+        with pytest.raises(Exception, match="not allowed"):
+            invoke()
+    assert sent == []
 
 def test_symlinked_output_and_evidence_targets_are_not_overwritten(monkeypatch, tmp_path):
     mod = _load_probe()
