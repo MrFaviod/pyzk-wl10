@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Safe WL10 live runner: read-only by default, one explicit write when asked."""
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -54,28 +55,24 @@ def _same_user(user, uid, badge):
 
 
 def _write_evidence(path, evidence):
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-            json.dump(evidence, stream, indent=2, sort_keys=True)
-            stream.write('\n')
-    except Exception:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-        raise
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+        json.dump(evidence, stream, indent=2, sort_keys=True)
+        stream.write('\n')
+
+
 def _preflight_evidence(path):
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    if os.path.lexists(path):
+        raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), path)
+    parent = os.path.dirname(os.path.abspath(path)) or os.curdir
+    flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0)
+    fd = os.open(parent, flags)
     try:
+        if not os.access(parent, os.W_OK | os.X_OK):
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), parent)
+    finally:
         os.close(fd)
-    except Exception:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-        raise
-    os.unlink(path)
 
 
 def _parser():

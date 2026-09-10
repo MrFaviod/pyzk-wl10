@@ -216,6 +216,17 @@ def test_missing_parent_evidence_rejects_before_connection(monkeypatch, tmp_path
     assert calls == []
     assert not evidence.parent.exists()
 
+def test_evidence_replacement_survives_failed_atomic_write(tmp_path):
+    mod = _load_runner()
+    evidence = tmp_path / "replacement.json"
+
+    mod._preflight_evidence(evidence)
+    evidence.write_text("attacker")
+
+    with pytest.raises(FileExistsError):
+        mod._write_evidence(evidence, {"outcome": "success"})
+    assert evidence.read_text() == "attacker"
+
 def test_help_documents_safe_contract(capsys):
     mod = _load_runner()
     assert mod.main(["--help"]) == 0
