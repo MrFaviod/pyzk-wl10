@@ -12,8 +12,7 @@ WHAT THIS SCRIPT DOES:
     7. Reads back and verifies deletion.
     8. Prints a structured report.
 
-Confirmed protocol against AK3750WIFI_TFT "Ver 6.60 May 19 2023"
-(firmware at <DEVICE_IP>):
+Confirmed protocol against AK3750WIFI_TFT "Ver 6.60 May 19 2023":
 
     WRITE user:  CMD=8 (CMD_USER_WRQ)   payload=72B (HB8s24s4sx7sx24s)
                  response: CMD_ACK_OK=2000

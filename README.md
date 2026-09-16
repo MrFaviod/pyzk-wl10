@@ -125,7 +125,7 @@ users = zk.wl10_get_users()         # list[User]
 attendance = zk.wl10_get_attendance()  # list[Attendance]
 
 # Write a new user (privilege 0 = USER_DEFAULT, 14 = USER_ADMIN)
-zk.wl10_set_user(uid=1000, name='Alice', privilege=0,
+zk.wl10_set_user(uid=1000, name='Nombre Apellido', privilege=0,
                  user_id='999950', card=0)
 
 # Delete a user (may return True but still leave the user on some FW)
@@ -148,9 +148,9 @@ parser.
 $ python3 listar_marcaciones.py <DEVICE_IP> --since 2026-07-01
    Badge | Nombre                         | Fecha/Hora             | Status | Punch
 --------------------------------------------------------------------------------
-     138 | Apellido, Nombre A        | 2026-07-01 14:05:38    | 1      | 0
-     209 | Apellido, Nombre B                  | 2026-07-01 15:24:53    | 1      | 0
-     134 | Apellido, Nombre C        | 2026-07-01 15:26:32    | 1      | 0
+     101 | Apellido, Nombre A             | 2026-07-01 14:05:38    | 1      | 0
+     102 | Apellido, Nombre B             | 2026-07-01 15:24:53    | 1      | 0
+     103 | Apellido, Nombre C             | 2026-07-01 15:26:32    | 1      | 0
      ...
 ```
 

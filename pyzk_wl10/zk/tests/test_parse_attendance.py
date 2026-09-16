@@ -25,17 +25,17 @@ class TestParseAttendance:
     def test_parse_with_users_map(self, zk_instance):
         ts = encode_zk_time(datetime(2026, 7, 1, 9, 0, 0))
         rec = pack_attendance_record(
-            uid=5, user_id=b'138', flag=1,
+            uid=5, user_id=b'101', flag=1,
             timestamp=ts, status=0)
         raw = pack_bulk_response(rec, WL10_ATT_RECORD_SIZE)
         users_map = {
-            '138': {'name': 'Apellido, Nombre A', 'badge': '138', 'uid': 5}
+            '101': {'name': 'Apellido, Nombre A', 'badge': '101', 'uid': 5}
         }
         atts = zk_instance._wl10_parse_attendance(raw, users_map)
         assert len(atts) == 1
         a = atts[0]
         assert a.name == 'Apellido, Nombre A'
-        assert a.badge == '138'
+        assert a.badge == '101'
 
     def test_parse_skips_zero_ts(self, zk_instance):
         rec = pack_attendance_record(
@@ -80,7 +80,7 @@ class TestParseAttendance:
             (1, 'Check-Out'),     # salida
             (2, 'Break-Out'),
             (3, 'Break-In'),
-            (4, 'Overtime-In'),   # observado en <DEVICE_IP>
+            (4, 'Overtime-In'),   # observado en firmware WL10
             (5, 'Overtime-Out'),
             (99, 'Unknown'),
         ]

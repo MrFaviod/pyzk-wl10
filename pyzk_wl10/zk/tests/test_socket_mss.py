@@ -1,7 +1,7 @@
 """Tests for TCP MSS override (tcp_maxseg) in ZK socket creation.
 
-Regression test for the <DEVICE_IP> case: the route to that device
-(via site-to-site VPN) has a low MTU and drops large fragmented packets
+Regression test for a low-MTU VPN route: the path to the tested device
+has a low MTU and drops large fragmented packets
 (PMTUD blackhole).  Users (432B) fit in one packet, but attendance bulk
 responses (up to ~3200B) exceed the MTU and never arrive -> timeout.
 Forcing TCP_MAXSEG=1200 makes the device's segments fit the path MTU.
@@ -31,7 +31,7 @@ def _build_zk(tcp_maxseg=None, force_udp=False):
     inst.verbose = False
     inst.encoding = 'UTF-8'
     inst.is_connect = False
-    inst._ZK__address = ('<DEVICE_IP>', 4370)
+    inst._ZK__address = ('203.0.113.10', 4370)
     inst._ZK__timeout = 5
     inst._ZK__session_id = 0
     inst._ZK__reply_id = 0

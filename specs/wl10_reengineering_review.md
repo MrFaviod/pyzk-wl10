@@ -3,7 +3,7 @@
 **Branch**: `reengineering` (from master @ e19b1cd)
 **Date**: 2026-08-12 (v2 — adversarial pass over v1 findings)
 **Scope**: `pyzk_wl10/` — fork of fananimi/pyzk, WL10/AK3750 TCP support (~3700 LOC, 115 offline tests)
-**Method**: static review + 115 offline tests + read-only live checks (test devices; NOT vpn-device) + **adversarial re-testing of every v1 claim** + external research (fananimi/pyzk issues, ZK protocol docs).
+**Method**: static review + 115 offline tests + read-only live checks (test devices; VPN device excluded from writes) + **adversarial re-testing of every v1 claim** + external research (fananimi/pyzk issues, ZK protocol docs).
 
 > **What changed vs v1**: severity corrections (BUG-4 downgraded, fallback de get_attendance descartado como bug), 3 new findings (BUG-5 `next_uid` no actualizado → sobrescribe Admin; BUG-6 attendance uid=0; M4 linking records `NN-`), y re-clasificación de "nombres desaparecidos" como limitación del modelo de datos.
 
@@ -19,7 +19,7 @@ El análisis adversarial de v1 **confirma 3 bugs críticos reales** (corrupción
 |---|----------|--------------|-------|
 | BUG-1 | `_wl10_scan_user_id` corrompe badges alfanuméricos | **CRÍTICO** | = |
 | BUG-2 | `wl10_set_user` sin validar uid/card → `struct.error` a media operación | **CRÍTICO** | = |
-| BUG-3 | Nombre truncado a 24 bytes corta multibyte (60% de usuarios del test-device) | **ALTO** | = |
+| BUG-3 | Nombre truncado a 24 bytes corta multibyte (60% de usuarios de un dispositivo de prueba) | **ALTO** | = |
 | BUG-4 | Dedup de marcaciones ignora `flag` | **MEDIO** (bajado) | ALTO → MEDIO |
 | **BUG-5 (NUEVO)** | `next_uid` NO se actualiza tras `wl10_get_users()` → `wl10_set_user(uid=None)` **sobrescribe al Admin (uid=1)** | **CRÍTICO** | — |
 | **BUG-6 (NUEVO)** | Attendance con `uid=0` (usuario borrado) se parsea como válido | MEDIO | — |
@@ -42,7 +42,7 @@ name='Juan 123', user_id='AB12'  →  decoded user_id: '123'   (debería ser 'AB
 name='Calificacion 4567 buena', user_id='XY' → user_id: '4567'
 ```
 
-**Contexto real (v2)**: el test-device contiene linking records reales (uid=3, badge=101, `priv=49`, sin nombre → `NN-101`). Para esos, el scan es el ÚNICO camino y funciona. **El bug es el caso intermedio**: badge alfanumérico + nombre con dígitos, o badge alfanumérico puro.
+**Contexto real (v2)**: un dispositivo de prueba contiene linking records (uid=3, badge=101, `priv=49`, sin nombre → `NN-101`). Para esos, el scan es el ÚNICO camino y funciona. **El bug es el caso intermedio**: badge alfanumérico + nombre con dígitos, o badge alfanumérico puro.
 
 **Impacto**: badges equivocados → marcaciones mal atribuidas; `wl10_delete_user(user_id=...)` borraría el usuario equivocado.
 
@@ -73,7 +73,7 @@ name = 'A'*23 + 'é'  →  name_pad = b'...AAA\xc3'  (0xC3 suelto)
 read-back errors='ignore' → 'AAA...' (la é desapareció)
 ```
 
-**Evidencia de campo (v2)**: del test-device, **23 de 38 usuarios (60%)** tienen nombres cortados a 22-23 caracteres visibles:
+**Evidencia de campo (v2)**: de un dispositivo de prueba, **23 de 38 usuarios (60%)** tienen nombres cortados a 22-23 caracteres visibles:
 - `'Amarilla Dominguez, Arn'` (23) — falta el final
 - `'Schmitke Reinhard ,Egar'` (23) — la 'd' de Edgar perdida
 
@@ -137,7 +137,7 @@ get_users:   dispatches on self.wl10 = True   ; get_attendance: True
 
 ### RISK-2 [MEDIO] Auto-incremento de badge colisiona con reales
 
-`wl10_set_user(uid=None)` asigna `user_id=str(next_uid)` = "1", "2"… que colisionan con badges reales (los reales usan existing-badge-range, pero "2" es legal). Se agrava con BUG-5 (next_uid incorrecto).
+`wl10_set_user(uid=None)` asigna `user_id=str(next_uid)` = "1", "2"… que colisionan con badges existentes (pero "2" es legal). Se agrava con BUG-5 (next_uid incorrecto).
 
 ### M1 [BAJA] Wrap de `reply_id` en `__create_header`
 L163-171: `if reply_id >= USHRT_MAX: reply_id -= USHRT_MAX` — en el borde exacto 65535 queda 0. No observado en práctica.
@@ -147,7 +147,7 @@ L163-171: `if reply_id >= USHRT_MAX: reply_id -= USHRT_MAX` — en el borde exac
 ### M3 [BAJA] `delete_user` nativo L1812 usa `pack('h')` (con signo) — confirmado por pyzk PR #261
 
 ### M4 [INFORMATIVO — NUEVO] Linking records (priv=49) → `NN-<badge>`
-El dump real del test-device muestra 2 usuarios `NN-101`, `NN-102` con `priv=49`. **No es un bug**: son records de huella sin user completo (el nombre nunca existió en el device). Es una limitación del modelo de datos: la librería no puede mostrar un nombre que el dispositivo no tiene. Documentar para el usuario final: "NN-" = solo huella registrada.
+El dump real de un dispositivo de prueba muestra 2 usuarios `NN-101`, `NN-102` con `priv=49`. **No es un bug**: son records de huella sin user completo (el nombre nunca existió en el device). Es una limitación del modelo de datos: la librería no puede mostrar un nombre que el dispositivo no tiene. Documentar para el usuario final: "NN-" = solo huella registrada.
 
 ---
 
@@ -178,17 +178,17 @@ El dump real del test-device muestra 2 usuarios `NN-101`, `NN-102` con `priv=49`
 | Prueba | Resultado |
 |--------|-----------|
 | `python3 -m pytest pyzk_wl10/zk/tests/ -q` | **115 passed** (4.74s) |
-| `check_device.py` en test-device (read-only) | OK — lecturas correctas |
+| `check_device.py` en dispositivos de prueba (read-only) | OK — lecturas correctas |
 | Repro BUG-1 (badge alfanumérico + dígitos en nombre) | CONFIRMADO |
 | Repro BUG-2 (uid 70000 / card 2^40) | CONFIRMADO |
-| Repro BUG-3 (23 ASCII + é; 60% usuarios test-device truncados) | CONFIRMADO |
+| Repro BUG-3 (23 ASCII + é; 60% usuarios truncados en dispositivo de prueba) | CONFIRMADO |
 | Repro BUG-5 (get_users no actualiza next_uid → sobrescribe Admin) | **CONFIRMADO (nuevo)** |
 | Repro BUG-6 (attendance uid=0) | CONFIRMADO (nuevo) |
 | Repro BUG-4 (flag distinto mismo segundo) | CONFIRMADO (teórico) |
 | Fallback get_attendance (flag wl10 restaurado) | CORRECTO (v1 se equivocó) |
 | Gates de completitud (bulk truncado 17B, 8B) | CORRECTOS — protegen |
 
-**vpn-device NO tocado. Ninguna escritura realizada.**
+**Dispositivo VPN NO tocado con escrituras. Ninguna escritura realizada.**
 
 ---
 
@@ -205,7 +205,7 @@ El dump real del test-device muestra 2 usuarios `NN-101`, `NN-102` con `priv=49`
 9. **[BAJA] M1/M2/M3**: wrap reply_id, encoding consistente, pack('<H').
 10. **[DOC] M4**: documentar que NN- = linking record (solo huella), no error.
 
-**Proceso**: TDD estricto (test rojo → fix → suite 115+green), verificación read-only en test devices, NUNCA en vpn-device sin instrucción.
+**Proceso**: TDD estricto (test rojo → fix → suite 115+green), verificación read-only en dispositivos de prueba, NUNCA en el dispositivo VPN sin instrucción.
 
 ---
 
@@ -274,7 +274,7 @@ En el modelo estándar ZK, los templates viven en una tabla separada gestionada 
 
 ---
 
-# ADDENDUM — 2026-09-10 UTC — TARGET <DEVICE_IP>
+# ADDENDUM — 2026-09-10 UTC — TARGET <REDACTED>
 
 This dated addendum records the recovered Task 6 characterization without
 rewriting the historical v2/v3 findings above. It contains no raw payload
@@ -282,7 +282,7 @@ bytes, attendance rows, badges, serials, MAC addresses, or raw capture names.
 
 ## Result
 
-- Target: `<DEVICE_IP>`.
+- Target: `<DEVICE_IP>` (redacted, VPN-tested device).
 - The default read-only profile started at 01:55:22Z, was interrupted by the
   wrapper timeout at 01:57:22Z, and left five partial captures without a
   summary. Its prior hashes and bin lengths remain unchanged. No mutation was

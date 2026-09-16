@@ -12,7 +12,7 @@ class TestParseUsers:
         rec = pack_user_record(
             uid=5, privilege=USER_ADMIN, password=b'secret',
             name=b'Apellido, Nombre A',
-            card=12345, group_id=b'1', user_id=b'138')
+            card=12345, group_id=b'1', user_id=b'101')
         user = zk_instance._wl10_decode_user_record(rec)
         assert user is not None
         assert user.uid == 5
@@ -21,7 +21,7 @@ class TestParseUsers:
         assert user.password == 'secret'
         assert user.card == 12345
         assert user.group_id == '1'
-        assert user.user_id == '138'
+        assert user.user_id == '101'
 
     def test_decode_linking_record(self, zk_instance):
         path = os.path.join(FIXTURES_DIR, 'user_linking_72.bin')
@@ -31,9 +31,9 @@ class TestParseUsers:
         assert user is not None
         # uid should be 7 (from pack_user_record)
         assert user.uid == 7
-        # The fallback should have picked up '209' from the scan
-        assert user.user_id == '209', \
-            f'Expected user_id=209, got {user.user_id!r}'
+        # The fallback should have picked up '102' from the scan
+        assert user.user_id == '102', \
+            f'Expected user_id=102, got {user.user_id!r}'
 
     def test_decode_all_zeros(self, zk_instance):
         rec = b'\x00' * 72
