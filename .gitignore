@@ -148,3 +148,16 @@ cython_debug/
 
 # Local agent workspace (untracked, never push)
 .commandcode/
+
+# Local code graph (absolute symlink, never push)
+.codegraph
+
+# SDD work units: raw device evidence, reviews, reports (defense in depth;
+# nested .superpowers/sdd/.gitignore already ignores everything)
+.superpowers/
+
+# WL10 probe/runner artefacts (device-adjacent, never commit)
+*.csv
+*gate*.json
+*evidence*.json
+*.tar.gz
