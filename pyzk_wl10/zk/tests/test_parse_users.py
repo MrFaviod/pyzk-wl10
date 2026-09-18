@@ -66,6 +66,52 @@ class TestParseUsers:
     def test_parse_users_empty(self, zk_instance):
         assert zk_instance._wl10_parse_users(b'') == []
 
+    def test_nameless_records_are_not_users(self, zk_instance):
+        """Ghost records must not be reported as people.
+
+        The firmware interleaves sidecar records (fingerprint/linking
+        storage) with the real user table. They carry a uid and often a
+        scannable badge but no name, and the library used to synthesize
+        ``NN-<badge>`` users for them — which inflates the user list and
+        turns template storage into a delete/write target. They are kept
+        out of the user list and reported separately instead.
+        """
+        real = pack_user_record(uid=5, name=b'Apellido, Nombre A', user_id=b'101')
+        ghost = pack_user_record(uid=7, name=b'', user_id=b'102')
+        raw = pack_bulk_response(real + ghost, WL10_USER_RECORD_SIZE)
+
+        users = zk_instance._wl10_parse_users(raw)
+
+        assert [user.uid for user in users] == [5]
+        assert zk_instance._wl10_sidecar_uids == {7}
+
+    def test_a_table_of_only_nameless_records_has_no_users(self, zk_instance):
+        ghost = pack_user_record(uid=7, name=b'', user_id=b'102')
+        raw = pack_bulk_response(ghost, WL10_USER_RECORD_SIZE)
+
+        assert zk_instance._wl10_parse_users(raw) == []
+        assert zk_instance._wl10_sidecar_uids == {7}
+
+    def test_a_named_record_wins_over_its_sidecar_twin(self, zk_instance):
+        """A uid may appear twice; the named record is the person."""
+        ghost = pack_user_record(uid=7, name=b'', user_id=b'102')
+        real = pack_user_record(uid=7, name=b'Real', user_id=b'102')
+        raw = pack_bulk_response(ghost + real, WL10_USER_RECORD_SIZE)
+
+        users = zk_instance._wl10_parse_users(raw)
+
+        assert [user.name for user in users] == ['Real']
+        assert zk_instance._wl10_sidecar_uids == {7}
+
+    def test_template_slots_are_sidecars_not_users(self, zk_instance):
+        """priv=0x31 storage is excluded, and the sidecar set starts clean."""
+        slot = pack_user_record(uid=3, name=b'', user_id=b'101', privilege=0x31)
+        raw = pack_bulk_response(slot, WL10_USER_RECORD_SIZE)
+
+        assert zk_instance._wl10_parse_users(raw) == []
+        assert zk_instance._wl10_template_uids == {3}
+        assert zk_instance._wl10_sidecar_uids == set()
+
     def test_decode_template_slot_returns_none(self, zk_instance):
         # Fingerprint-template slots are interleaved in the user table with
         # privilege byte 0x31 (49). They must never be parsed as users.

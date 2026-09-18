@@ -87,6 +87,42 @@ class ZK:
     below for the protocol details.
     """
 
+    # Read-only wire command the standard reader uses to follow a bulk
+    # announcement with bounded chunk fetches.
+    WL10_READ_CHUNK = 1504
+    # Largest chunk accepted by the standard reader's chunk loop.
+    WL10_MAX_CHUNK = 0xFFC0
+    # Conservative ceiling for an announced template table. The observed
+    # live sizes are ~18-24 KB; this allows two orders of magnitude of
+    # headroom while still refusing to allocate on an absurd number.
+    WL10_MAX_ANNOUNCED_SIZE = 64 * 1024 * 1024
+
+    # True while the read session is known to be in sync. A failed chunk
+    # read leaves announced bytes unread, so the stream is unsafe from that
+    # point on and no further read may be issued on it.
+    _wl10_stream_safe = True
+
+    # Shape of the last synchronous data response seen by
+    # :meth:`_wl10_read_data_response`: ``status``, ``declared`` (TCP frame
+    # length) and ``payload_len``. These are protocol lengths, never
+    # payload bytes, and they are what makes an unclassified status
+    # measurable instead of guessed at.
+    _wl10_last_data_response = None
+
+    # Set by _wl10_parse_users: uids of nameless sidecar records the
+    # firmware interleaves with the real user table. They are template /
+    # linking storage, never people, and are kept out of the user list.
+    _wl10_sidecar_uids = frozenset()
+
+    # Per-user/per-finger template read. The request body is
+    # ``pack('hb', uid, fid)`` and the response is a ``CMD_DATA`` payload.
+    WL10_USER_TEMPLATE = 88
+
+    # Finger indexes the device stores per user. Fid outside this range is
+    # refused before a request is built.
+    WL10_MAX_FID = 9
+
+
     def __init__(self, ip, port=4370, timeout=60, password=0, force_udp=False, ommit_ping=False, verbose=False, encoding='UTF-8', wl10=False, tcp_maxseg=None, gap_timeout=1):
         User.encoding = encoding
         self.__address = (ip, port)
@@ -614,6 +650,10 @@ class ZK:
                 self.fingers_av = fields[17]
                 self.users_av = fields[18]
                 self.rec_av = fields[19]
+                if len(self.__data) >= 92:
+                    faces = unpack('3i', self.__data[80:92])
+                    self.faces = faces[0]
+                    self.faces_cap = faces[2]
                 return True
         except Exception:
             pass
@@ -834,9 +874,12 @@ class ZK:
             self.__timeout = old_timeout
             self.ommit_ping = old_ommit_ping
 
-    def _wl10_read_raw_command(self, command_code):
+    def _wl10_read_raw_command(self, command_code, command_string=b''):
         """Send a command and read the entire response via raw recv.
 
+        ``command_string`` carries the ZK request body. It is ``b''`` for
+        the plain table reads (users, attendance) and the standard
+        ``CMD_DATA_WRRQ`` wrapper for the fingerprint-template table.
         Resilient drain (Oracle bg_58bcb925 — general WL10 mode, no
         per-IP special-casing):
 
@@ -889,7 +932,7 @@ class ZK:
         self._wl10_last_ack = None
 
         for attempt in range(3):
-            buf = self.__create_header(command_code, b'', self.__session_id, self.__reply_id)
+            buf = self.__create_header(command_code, command_string, self.__session_id, self.__reply_id)
             top = self.__create_tcp_top(buf)
             try:
                 self.__sock.send(top)
@@ -898,44 +941,14 @@ class ZK:
                     print(f'  [raw] send error: {e}')
                 return b''
 
-            all_raw = b''
-            # First chunk: bounded by min(__timeout, 10) so a dead
-            # device doesn't pay the full timeout per attempt. Oracle:
-            # making every initial read wait the full timeout slows
-            # dead-device recovery unnecessarily.
-            self.__sock.settimeout(min(self.__timeout, 10))
-            # Silence fallback grows across attempts, clamped by the
-            # connection timeout. Attempt 1 = gap_timeout (default 1 =
-            # historical LAN behaviour); 2 = 2x; 3 = 4x.
-            silence_gap = min(self.gap_timeout * (2 ** attempt),
-                              self.__timeout)
-            try:
-                while True:
-                    chunk = self.__sock.recv(65536)
-                    if not chunk:
-                        break
-                    all_raw += chunk
-                    # If a complete terminal ACK is now present, stop
-                    # draining — the device signaled end-of-response.
-                    last_ack = self._wl10_scan_for_terminal_ack(all_raw)
-                    if last_ack is not None:
-                        self._wl10_last_ack = last_ack
-                        break
-                    # Otherwise wait up to the adaptive silence gap for
-                    # the next chunk / ACK.
-                    self.__sock.settimeout(silence_gap)
-            except timeout:
-                pass
-            except Exception as e:
-                if self.verbose:
-                    print(f'  [raw] recv error: {e}')
-            finally:
-                self.__sock.settimeout(self.__timeout)
+            all_raw = self._wl10_drain_raw(
+                min(self.gap_timeout * (2 ** attempt), self.__timeout))
 
             if all_raw:
                 payload = self._wl10_extract_tcp_payloads(all_raw)
                 if self.verbose:
-                    print(f'  [raw] cmd={command_code} attempt={attempt + 1} '
+                    print(f'  [raw] cmd={command_code} '
+                          f'body={len(command_string)} attempt={attempt + 1} '
                           f'raw={len(all_raw)} payload={len(payload)} '
                           f'ack={self._wl10_last_ack}')
                 # If we saw a terminal ACK, sync __reply_id from it and
@@ -956,6 +969,43 @@ class ZK:
                     print('  [raw] payload too small / no ACK, retrying')
 
         return b''
+
+    def _wl10_drain_raw(self, silence_gap):
+        """Drain raw TCP bytes until a terminal ACK arrives or the link quiets.
+
+        Returns the raw stream and leaves ``_wl10_last_ack`` set when a
+        complete terminal ACK was seen. This is the recv half of
+        :meth:`_wl10_read_raw_command`, shared with the per-user template
+        push, which has no request of its own to send.
+
+        The first chunk is bounded by ``min(__timeout, 10)`` so a dead
+        device doesn't pay the full timeout. After each chunk the read
+        waits up to ``silence_gap`` for the next one, which is how the
+        adaptive silence fallback grows across the caller's attempts.
+        """
+        all_raw = b''
+        self.__sock.settimeout(min(self.__timeout, 10))
+        try:
+            while True:
+                chunk = self.__sock.recv(65536)
+                if not chunk:
+                    break
+                all_raw += chunk
+                # A complete terminal ACK means the device signaled
+                # end-of-response; stop draining.
+                last_ack = self._wl10_scan_for_terminal_ack(all_raw)
+                if last_ack is not None:
+                    self._wl10_last_ack = last_ack
+                    break
+                self.__sock.settimeout(silence_gap)
+        except timeout:
+            pass
+        except Exception as e:
+            if self.verbose:
+                print(f'  [raw] recv error: {e}')
+        finally:
+            self.__sock.settimeout(self.__timeout)
+        return all_raw
 
     def _wl10_read_bulk_data(self, command_code, function_code=0):
         """Read a bulk response from the WL10/AK3750 device.
@@ -1239,9 +1289,549 @@ class ZK:
             users_map[str(u.uid)] = entry
         return users_map
 
+    @staticmethod
+    def _wl10_parse_templates(table):
+        """Parse a fingerprint-template table into ``Finger`` objects.
+
+        Layout (standard pyzk ``CMD_DB_RRQ`` / ``FCT_FINGERTMP`` table):
+
+            uint32 total_size   byte count of the entries that follow
+            entry: size:uint16, uid:uint16, fid:int8, valid:int8,
+                   template[size - 6]
+
+        Fails closed with a :class:`ZKErrorResponse` on truncation, a
+        declared total that does not match the body, or an entry size
+        that underflows the 6-byte header / overruns the table. A
+        partial table is never returned as if it were complete.
+        """
+        if len(table) < 4:
+            raise ZKErrorResponse(
+                f'truncated template table: {len(table)} bytes, need 4 for total size')
+        total_size = unpack('I', table[:4])[0]
+        body = table[4:]
+        if total_size != len(body):
+            raise ZKErrorResponse(
+                f'truncated template table: declared {total_size} bytes, got {len(body)}')
+
+        templates = []
+        offset = 0
+        remaining = total_size
+        while remaining:
+            if remaining < 6:
+                raise ZKErrorResponse(
+                    f'truncated template table: {remaining} bytes left, need 6 for the entry header')
+            size, uid, fid, valid = unpack('HHbb', body[offset:offset + 6])
+            if size < 6 or size > remaining:
+                raise ZKErrorResponse(
+                    f'invalid template entry size {size} at offset {offset} '
+                    f'({remaining} bytes remaining)')
+            template = body[offset + 6:offset + size]
+            templates.append(Finger(uid, fid, valid, template))
+            offset += size
+            remaining -= size
+        return templates
+
+    @staticmethod
+    def _wl10_template_request():
+        """Build the fingerprint-template table read request body.
+
+        This is the exact request the standard pyzk reader builds before
+        handing it to ``read_with_buffer``. A *direct* ``CMD_DB_RRQ`` (7)
+        with an empty body is a different request: live probes on all
+        three authorized WL10s answered it with terminal ``CMD_ACK_OK``
+        and zero payload on every device.
+        """
+        return pack('<bhii', 1, const.CMD_DB_RRQ, const.FCT_FINGERTMP, 0)
+
+    @staticmethod
+    def _wl10_parse_announcement(raw_data):
+        """Parse the 13-byte prepare/read announcement, or fail closed.
+
+        Live read-only probes on all three authorized WL10s answered the
+        wrapped template request with this exact shape and nothing else:
+
+            reserved:uint8 (0), size:uint32, size:uint32, trailer[4]
+
+        The two sizes are identical and the trailing 4 bytes are retained
+        only as opaque checksum/metadata (they are not interpreted).
+        Length, the reserved byte, size equality, zero size and an
+        unreasonable size are all rejected: the announcement drives an
+        allocation, so an unvalidated size would let a device ask for
+        unbounded memory. The accepted ceiling is
+        :attr:`WL10_MAX_ANNOUNCED_SIZE`.
+        """
+        if len(raw_data) != 13:
+            raise ZKErrorResponse(
+                f'invalid template announcement: {len(raw_data)} bytes, expected 13')
+        if raw_data[0] != 0:
+            raise ZKErrorResponse(
+                f'invalid template announcement: reserved byte {raw_data[0]} is not 0')
+        size_a = unpack('<I', raw_data[1:5])[0]
+        size_b = unpack('<I', raw_data[5:9])[0]
+        if size_a != size_b:
+            raise ZKErrorResponse(
+                f'invalid template announcement: sizes disagree ({size_a} != {size_b})')
+        if size_a == 0:
+            raise ZKErrorResponse('invalid template announcement: size 0')
+        if size_a > ZK.WL10_MAX_ANNOUNCED_SIZE:
+            raise ZKErrorResponse(
+                f'template announcement size {size_a} exceeds the maximum '
+                f'{ZK.WL10_MAX_ANNOUNCED_SIZE}')
+        return size_a
+
+    def _wl10_send_raw_frame(self, command_code, command_string=b''):
+        """Send one framed request and advance the reply_id from its header.
+
+        The device increments its reply_id on every command it accepts, so
+        the client must track the value it just sent to stay in sync. This
+        mirrors the bookkeeping the ACK-terminated drain performs from the
+        terminal ACK, for responses that carry no separate ACK.
+        """
+        if not self.is_connect:
+            raise ZKErrorConnection('instance are not connected.')
+        buf = self.__create_header(command_code, command_string, self.__session_id, self.__reply_id)
+        self.__sock.send(self.__create_tcp_top(buf))
+        self.__reply_id = unpack('<4H', buf[:8])[3]
+
+    def _wl10_read_chunk_response(self, size):
+        """Read exactly one synchronous chunk response, or fail closed.
+
+        This is a self-contained implementation of the standard reader's
+        ``__recieve_chunk`` contract for a ``CMD_DATA`` response: the first
+        ``recv`` carries the header and payload together, and the payload
+        length must equal the requested ``size``.
+
+        It is deliberately *not* routed through
+        :meth:`_wl10_read_raw_command`. That drain is built around a
+        terminal ``CMD_ACK_OK``/``CMD_ACK_ERROR`` frame; command 1504 does
+        not send one, so the drain extracts zero payload for a perfectly
+        good chunk (observed live on all three authorized WL10s). Any
+        status other than ``CMD_DATA``, and any short or overlong payload,
+        fails closed: a mismatch means the session is out of sync, and
+        padding it would silently corrupt the table.
+        """
+        old_timeout = self.__timeout
+        self.__sock.settimeout(min(self.__timeout, 10))
+        try:
+            recv_size = size + 32 if self.tcp else 1024 + 8
+            data_recv = self.__sock.recv(recv_size)
+            if self.tcp:
+                if self.__test_tcp_top(data_recv) == 0:
+                    raise ZKErrorResponse(
+                        'invalid TCP frame in the template chunk response')
+                response, _ck, _sid, rid = unpack('<4H', data_recv[8:16])
+                payload = data_recv[16:]
+            else:
+                response, _ck, _sid, rid = unpack('<4H', data_recv[:8])
+                payload = data_recv[8:]
+            self.__reply_id = rid
+            # A chunk may arrive split across TCP segments; keep reading
+            # until it is complete or the socket goes quiet.
+            while len(payload) < size:
+                extra = self.__sock.recv(recv_size - len(payload))
+                if not extra:
+                    break
+                payload += extra
+        except timeout:
+            raise ZKErrorResponse('the template chunk response timed out')
+        except ZKErrorResponse:
+            raise
+        except Exception as e:
+            raise ZKErrorResponse(f'reading the template chunk failed: {e}')
+        finally:
+            self.__sock.settimeout(old_timeout)
+        if response != const.CMD_DATA:
+            raise ZKErrorResponse(
+                f'template chunk response status {response} is not CMD_DATA')
+        if len(payload) != size:
+            raise ZKErrorResponse(
+                f'template chunk response carried {len(payload)} bytes, expected {size}')
+        return payload
+
+    def _wl10_read_data_response(self, ack_error_is_absence=False,
+                                 prepare_data_is_announcement=False):
+        """Read one synchronous ``CMD_DATA`` response, or fail closed.
+
+        Commands 88 and 1504 answer the same way: the payload arrives in
+        the same synchronous exchange as its header, and the frame's own
+        declared length says how many bytes follow. There is no terminal
+        ACK, so this is not routed through the ACK-terminated drain.
+
+        Returns the payload, or ``None`` for a bare ``CMD_ACK_OK`` with no
+        payload (the device's explicit "nothing here" answer). An
+        ``ACK_ERROR``, a status that is neither ``CMD_DATA`` nor
+        ``CMD_ACK_OK``, a timeout, or a frame that declares more bytes than
+        it delivers all raise: a sent request whose answer was not fully
+        understood leaves the session uncertain.
+
+        ``ack_error_is_absence`` is set only by command 88, whose firmware
+        answers a missing uid/fid with a complete ``ACK_ERROR`` instead of
+        an empty success. It turns that one status into ``None``. The
+        status is only reached after the frame's declared length has been
+        fully consumed, so the session is still in sync and stays safe.
+        ``prepare_data_is_announcement`` is also set only by command 88:
+        a uid/fid that *does* hold a template answers ``CMD_PREPARE_DATA``,
+        whose payload is the announcement for a body the device then
+        pushes. That payload is returned for the caller to follow up. Every
+        other status keeps the strict behaviour above.
+        """
+        old_timeout = self.__timeout
+        self.__sock.settimeout(min(self.__timeout, 10))
+        declared = None
+        try:
+            data_recv = self.__sock.recv(65536)
+            if not data_recv:
+                raise ZKErrorResponse('the template response was empty')
+            if self.tcp:
+                declared = self.__test_tcp_top(data_recv)
+                if declared < 8 or len(data_recv) < 16:
+                    raise ZKErrorResponse(
+                        'invalid TCP frame in the template response')
+                response, _ck, _sid, rid = unpack('<4H', data_recv[8:16])
+                need = declared - 8
+                payload = data_recv[16:16 + need]
+                while len(payload) < need:
+                    more = self.__sock.recv(need - len(payload))
+                    if not more:
+                        raise ZKErrorResponse(
+                            f'the template response carried {len(payload)} of '
+                            f'{need} bytes')
+                    payload += more
+            else:
+                response, _ck, _sid, rid = unpack('<4H', data_recv[:8])
+                payload = data_recv[8:]
+        except timeout:
+            raise ZKErrorResponse('the template response timed out')
+        except ZKErrorResponse:
+            raise
+        except Exception as e:
+            raise ZKErrorResponse(f'reading the template response failed: {e}')
+        finally:
+            self.__sock.settimeout(old_timeout)
+        self.__reply_id = rid
+        self._wl10_last_data_response = {
+            'status': response,
+            'declared': declared,
+            'payload_len': len(payload),
+            'rid': rid,
+        }
+        if response == const.CMD_ACK_ERROR:
+            if ack_error_is_absence:
+                return None
+            raise ZKErrorResponse('the device rejected the template read (ACK_ERROR)')
+        if response == const.CMD_ACK_OK:
+            return None
+        if response == const.CMD_PREPARE_DATA and prepare_data_is_announcement:
+            return payload
+        if response != const.CMD_DATA:
+            raise ZKErrorResponse(
+                f'template response status {response} is not CMD_DATA')
+        return payload
+
+    def _wl10_read_prepared_body(self, announcement):
+        """Read the body a ``CMD_PREPARE_DATA`` announcement promised.
+
+        The measured live announcement for command 88 is an 8-byte payload
+        carrying the size twice and no data of its own. The device then
+        pushes the body in the frames that follow and ends the push with
+        the usual terminal ACK, the same bulk shape commands 9 and 13 use.
+
+        Only the announced size is taken from the announcement; the pushed
+        bytes must then match it exactly and end with a terminal ACK. A
+        mismatch means the session is out of sync, so it fails closed
+        rather than returning a short or padded template.
+        """
+        if len(announcement) < 8:
+            raise ZKErrorResponse(
+                f'truncated prepare-data announcement: {len(announcement)} bytes, '
+                'need 8 for the two size fields')
+        announced = unpack('<I', announcement[:4])[0]
+        if announced <= 0 or announced > ZK.WL10_MAX_ANNOUNCED_SIZE:
+            raise ZKErrorResponse(
+                f'implausible announced template size {announced}')
+        self._wl10_last_ack = None
+        raw = self._wl10_drain_raw(getattr(self, 'gap_timeout', 1) or 1)
+        if self._wl10_last_ack is None:
+            raise ZKErrorResponse(
+                'the pushed template body did not end with a terminal ACK')
+        _pcmd, rid = self._wl10_last_ack
+        self.__reply_id = rid
+        body = self._wl10_extract_tcp_payloads(raw)
+        if len(body) != announced:
+            raise ZKErrorResponse(
+                f'the pushed template body carried {len(body)} bytes, '
+                f'expected {announced}')
+        return body
+
+    def _wl10_read_user_template(self, uid, fid):
+        """Read one user's stored template for a single finger index.
+
+        Command 88 carries exactly ``pack('hb', uid, fid)``, the same body
+        the standard reader sends, and answers with a ``CMD_DATA`` payload
+        holding the template followed by six zero padding bytes and a
+        single terminator byte. Both are stripped before the ``Finger`` is
+        built, mirroring ``get_user_template``.
+
+        Returns ``None`` when the device signals that this uid/fid stores
+        no template. That signal is a complete ``ACK_ERROR``, which live
+        read-only runs returned deterministically on the very first bounded
+        query on all three devices while every other read stayed complete;
+        a bare ACK with no payload is also treated as absence. Every other
+        ambiguous outcome raises instead of being retried or padded, and
+        marks the session unsafe: one logical attempt, because a request
+        already on the wire may have left unread bytes behind.
+        """
+        if not self.wl10:
+            raise ZKErrorResponse('Not in WL10 mode. Call with wl10=True')
+        if not getattr(self, 'tcp', True):
+            raise ZKErrorResponse('the user template read requires TCP mode')
+        if not self._wl10_stream_safe:
+            raise ZKErrorResponse(
+                'the read session is out of sync after an earlier failed '
+                'template read; reconnect before reading again')
+        if not isinstance(fid, int) or isinstance(fid, bool) \
+                or not 0 <= fid <= ZK.WL10_MAX_FID:
+            raise ZKErrorResponse(
+                f'invalid template finger index {fid!r}: expected 0..{ZK.WL10_MAX_FID}')
+        try:
+            self._wl10_send_raw_frame(ZK.WL10_USER_TEMPLATE, pack('<hb', uid, fid))
+            payload = self._wl10_read_data_response(
+                ack_error_is_absence=True, prepare_data_is_announcement=True)
+            observed = getattr(self, '_wl10_last_data_response', None)
+            if payload is not None and observed is not None \
+                    and observed['status'] == const.CMD_PREPARE_DATA:
+                payload = self._wl10_read_prepared_body(payload)
+        except Exception:
+            self._wl10_stream_safe = False
+            raise
+        if payload is None:
+            return None
+        # Terminator byte, then the six zero padding bytes.
+        resp = payload[:-1]
+        if resp[-6:] == b'\x00' * 6:
+            resp = resp[:-6]
+        if not resp:
+            return None
+        return Finger(uid, fid, 1, resp)
+
+    def wl10_user_fingerprints(self, users=None, fids=range(10),
+                               require_certified=True):
+        """Report which users on this device have a fingerprint enrolled.
+
+        Returns ``{uid: bool}`` covering every real user: ``True`` when the
+        device answered with a stored template for at least one finger
+        index, ``False`` when it reported no template for any of them.
+
+        The read stops at the first fid that holds a template, so a user
+        with a fingerprint costs one exchange per finger until it is found,
+        while a user without one costs a full ``fids`` sweep. Reserved
+        interleaved template slots are never probed: they are template
+        storage, not people.
+
+        Only presence is reported, never the finger index. Live on this
+        firmware the index a template answers on is **not stable across
+        sessions** — the same user answered on fid 0 in one run and fid 1 in
+        the next, while the set of users with a fingerprint was identical —
+        so a fid is not something a caller should branch on. Use
+        :meth:`wl10_scan_user_templates` for raw per-fid detail.
+
+        ``users`` may be parsed ``User`` objects, plain uids, or ``None`` to
+        read the user table first. An unclassified answer raises rather than
+        being reported as "no fingerprint".
+
+        A scan that finds **no template at all** is not certified. This
+        firmware has a live failure mode in which every template read is
+        refused with the same ``ACK_ERROR`` a genuinely template-less
+        uid/fid returns, and which clears only on a device restart. A scan
+        that did find at least one template proves the device is answering
+        command 88, which is what makes its absences trustworthy; a scan
+        that found none proves nothing. With ``require_certified`` (the
+        default) such a result raises instead of reporting that nobody has
+        a fingerprint; pass ``require_certified=False`` to accept it as-is.
+        """
+        if not self.wl10:
+            raise ZKErrorResponse('Not in WL10 mode. Call with wl10=True')
+        if users is None:
+            users = self.wl10_get_users()
+        reserved = getattr(self, '_wl10_template_uids', set())
+        report = {}
+        for user in users:
+            uid = user if type(user) is int else getattr(user, 'uid', None)
+            if type(uid) is not int or uid in reserved:
+                continue
+            report[uid] = False
+            for fid in fids:
+                if self._wl10_read_user_template(uid, fid) is not None:
+                    report[uid] = True
+                    break
+        if require_certified and report and not any(report.values()):
+            raise ZKErrorResponse(
+                f'the device reported no fingerprint for any of the {len(report)} '
+                'users, which is indistinguishable from this firmware refusing '
+                'every template read (a state that clears only on a device '
+                'restart). Restart the device and re-run, or pass '
+                'require_certified=False to accept the result as it stands.')
+        return report
+
+    def wl10_scan_user_templates(self, uids, fids=range(10)):
+        """Read the stored templates for the given real user UIDs.
+
+        ``uids`` must be real users from a successfully parsed user table.
+        Interleaved template slots are skipped: they are not people, and
+        presenting template storage as a user is exactly the confusion this
+        campaign exists to avoid.
+
+        Returns ``{uid: [Finger, ...]}`` with only the templates the device
+        reported. An absent fid is simply missing, never a placeholder, and
+        a failed read raises rather than being recorded as "no template".
+        """
+        if not self.wl10:
+            raise ZKErrorResponse('Not in WL10 mode. Call with wl10=True')
+        reserved = getattr(self, '_wl10_template_uids', set())
+        found = {}
+        for uid in uids:
+            if uid in reserved:
+                continue
+            present = []
+            for fid in fids:
+                finger = self._wl10_read_user_template(uid, fid)
+                if finger is not None:
+                    present.append(finger)
+            found[uid] = present
+        return found
+
+    def _wl10_read_announced_chunk(self, start, size):
+        """Read one bounded template chunk with read-only command 1504.
+
+        Command 1504 is the standard reader's chunk request:
+        ``pack('<ii', start, size)`` and the device answers with
+        ``CMD_DATA`` in the first synchronous ``recv``. It does **not**
+        use the ACK-terminated response shape of commands 9/13/1503, so
+        it is read through :meth:`_wl10_read_chunk_response` instead of
+        :meth:`_wl10_read_raw_command`.
+
+        ``start`` must be non-negative and ``size`` positive and no
+        larger than one :attr:`WL10_MAX_CHUNK`; a chunk that returns
+        anything other than exactly ``size`` bytes fails closed.
+        """
+        if not self.tcp:
+            raise ZKErrorResponse('the template chunk read requires TCP mode')
+        if start < 0 or size <= 0 or size > ZK.WL10_MAX_CHUNK:
+            raise ZKErrorResponse(
+                f'invalid template chunk range start={start} size={size}')
+        try:
+            self._wl10_send_raw_frame(ZK.WL10_READ_CHUNK, pack('<ii', start, size))
+            return self._wl10_read_chunk_response(size)
+        except Exception:
+            # The request went out but we do not have its bytes. Whatever
+            # the device still owes us is unread, so the session can no
+            # longer be trusted for any later read.
+            self._wl10_stream_safe = False
+            raise
+
+    def _wl10_read_announced_body(self, total):
+        """Fetch ``total`` bytes in :attr:`WL10_MAX_CHUNK` slices.
+
+        Any short or overlong chunk fails closed rather than being
+        patched up: a mismatch means the session is out of sync, and
+        guessing would silently corrupt the table.
+        """
+        parts = []
+        start = 0
+        while start < total:
+            chunk = min(ZK.WL10_MAX_CHUNK, total - start)
+            parts.append(self._wl10_read_announced_chunk(start, chunk))
+            start += chunk
+        return b''.join(parts)
+
+    def _wl10_get_templates(self):
+        """Read the fingerprint-template table over the WL10 raw TCP path.
+
+        Stages, all read-only:
+
+        1. One ``CMD_DATA_WRRQ`` (1503) request carrying the exact standard
+           template-table body. The drain uses the existing ACK/silence
+           logic.
+        2. The response is the observed 13-byte prepare/read announcement
+           (see :meth:`_wl10_parse_announcement`), whose announced size is
+           then fetched with bounded raw ``1504`` chunk reads.
+        3. The fetched bytes are parsed by the existing fail-closed
+           :meth:`_wl10_parse_templates`.
+
+        This is deliberately **one** logical attempt. Retrying stage 1
+        after a structurally valid announcement would re-issue the request
+        while unread buffered data or a desynchronized session may still
+        be in flight, so an ambiguous chunk failure fails closed instead
+        of retrying. ``read_sizes.fingers`` is corroboration only and is
+        never used to invent template entries.
+        """
+        raw = self._wl10_read_raw_command(
+            const.CMD_DATA_WRRQ, self._wl10_template_request())
+        body = self._wl10_template_body(raw)
+        if not body:
+            raise ZKErrorResponse(
+                'Cannot read a complete template table from the device '
+                '(the wrapped request returned no payload)')
+        if len(body) == 13:
+            announced = self._wl10_parse_announcement(body)
+            try:
+                body = self._wl10_read_announced_body(announced)
+            finally:
+                # The standard reader frees the device's buffer after its
+                # chunk loop. This firmware keeps a single bulk buffer and
+                # will not service template reads until it is released: an
+                # abandoned fetch was observed leaving a device answering
+                # every template read with ACK_ERROR, and another refusing
+                # sessions entirely, until it was freed. Best effort only —
+                # a desynchronized session must not raise from cleanup.
+                try:  # noqa: SIM105  # best-effort release, never masks the real error
+                    self.free_data()
+                except Exception:
+                    pass
+            if len(body) != announced:
+                raise ZKErrorResponse(
+                    f'template fetch returned {len(body)} bytes for an '
+                    f'announcement of {announced}')
+            if announced > 4 and unpack('<I', body[:4])[0] == 0:
+                # A 4-byte zero prefix declares an empty table while the
+                # device announced a real one. Reporting that as "0
+                # templates, complete" is the defect this guard exists to
+                # prevent: the announced bytes would be silently dropped.
+                raise ZKErrorResponse(
+                    f'template announcement of {announced} bytes contradicts '
+                    'a zero-size table')
+        return self._wl10_parse_templates(body)
+
+    @staticmethod
+    def _wl10_template_body(raw_data):
+        """Strip the 12-byte WL10 bulk framing when present.
+
+        The raw drain may return either the bare table (``uint32
+        total_size`` first, as ``read_with_buffer`` does) or the framed
+        form whose third uint32 declares the section byte count. Accept
+        both without guessing: framing is recognized only on an exact
+        size match.
+        """
+        if len(raw_data) >= 12:
+            section = unpack('I', raw_data[8:12])[0]
+            if section == len(raw_data) - 12:
+                return raw_data[12:]
+        return raw_data
+
     def _wl10_parse_users(self, raw_data):
-        """Parse the user table and retain fingerprint-template slot UIDs."""
+        """Parse the user table, keeping non-user records out of the result.
+
+        The firmware interleaves sidecar records with the real user table:
+        fingerprint-template slots (``priv=0x31``) and nameless linking
+        records that carry a uid and often a scannable badge but no name.
+        Neither is a person. The template slots are protected as
+        ``_wl10_template_uids``; nameless records are protected as
+        ``_wl10_sidecar_uids``. Presenting them as ``NN-<badge>`` users is
+        what put ghost users into reports and turned template storage into a
+        delete/write target.
+        """
         self._wl10_template_uids = set()
+        self._wl10_sidecar_uids = set()
         records, n_declared = self._wl10_strip_header(
             raw_data, const.WL10_USER_RECORD_SIZE)
         if not records:
@@ -1259,11 +1849,17 @@ class ZK:
             user = self._wl10_decode_user_record(rec)
             if user is None or user.uid in seen:
                 continue
+            if not rec[11:35].split(b'\x00', 1)[0].strip():
+                # Nameless: a sidecar, not a person. Not marked as seen, so
+                # a named record for the same uid later in the table wins.
+                self._wl10_sidecar_uids.add(user.uid)
+                continue
             seen.add(user.uid)
             users.append(user)
 
         if self.verbose:
-            print(f'  [wl10_users] parsed {len(users)} users from {n} records')
+            print(f'  [wl10_users] parsed {len(users)} users from {n} records '
+                  f'({len(self._wl10_sidecar_uids)} nameless sidecars skipped)')
         return users
 
     def _wl10_decode_user_record(self, rec):
@@ -1441,6 +2037,14 @@ class ZK:
         attendances = self._wl10_get_attendance()
         self.records = len(attendances)
         return attendances
+
+    def wl10_get_templates(self):
+        """Public wrapper around :meth:`_wl10_get_templates`."""
+        if not self.wl10:
+            raise ZKErrorResponse('Not in WL10 mode. Call with wl10=True')
+        templates = self._wl10_get_templates()
+        self.fingers = len(templates)
+        return templates
 
     def _wl10_read_ack(self):
         """Read a simple ACK response from the device via raw recv.
@@ -1851,6 +2455,8 @@ class ZK:
             return None
 
     def get_templates(self):
+        if self.wl10:
+            return self.wl10_get_templates()
         self.read_sizes()
         if self.fingers == 0:
             return []

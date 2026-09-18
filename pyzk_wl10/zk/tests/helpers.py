@@ -47,6 +47,29 @@ def pack_attendance_record(uid, user_id, flag=1, timestamp=0, status=0):
                        int(timestamp), int(status), b'\x00' * 4)
 
 
+def pack_template_record(uid, fid, valid, template):
+    """Pack one variable-length fingerprint-template entry.
+
+    Layout (standard ``CMD_DB_RRQ`` / ``FCT_FINGERTMP`` table):
+    ``size:uint16, uid:uint16, fid:int8, valid:int8, template`` where
+    ``size`` counts the 6 header bytes plus the template body.
+    """
+    template = bytes(template)
+    size = len(template) + 6
+    if size > 0xFFFF:
+        raise ValueError(f'template too long for uint16 size: {len(template)} bytes')
+    return struct.pack('<HHbb', size, uid, fid, valid) + template
+
+
+def pack_template_table(entries):
+    """Pack a full template table: uint32 total size, then the entries.
+
+    ``entries`` is an iterable of ``(uid, fid, valid, template)`` tuples.
+    """
+    body = b''.join(pack_template_record(*entry) for entry in entries)
+    return struct.pack('<I', len(body)) + body
+
+
 def pack_bulk_response(records_bytes, record_size):
     """Frame ``records_bytes`` with the WL10 12-byte bulk header."""
     outer = 4 + len(records_bytes)
