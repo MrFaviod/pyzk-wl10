@@ -161,3 +161,10 @@ cython_debug/
 *gate*.json
 *evidence*.json
 *.tar.gz
+
+# Local Pi runtime state
+.atl/
+
+# SDD task ledgers (same policy as .superpowers/: local progress notes and live
+# device evidence stay untracked)
+odd/
